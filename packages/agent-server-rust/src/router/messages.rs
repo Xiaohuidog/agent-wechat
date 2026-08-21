@@ -12,7 +12,7 @@ use crate::ia::types::{MediaResult, Message, SendResult, SubscriptionEvent};
 use crate::plans::send_message::{SendMessageParams, SendMessagePlan};
 use crate::tools::wechat_db::{find_wechat_pid, list_account_dbs};
 use crate::tools::wechat_keys::{extract_keys_async, get_stored_keys, get_image_keys, store_keys};
-use crate::tools::wechat_media::get_message_media;
+use crate::tools::wechat_media::{get_message_media, get_reference_media};
 use crate::tools::wechat_messages;
 use crate::sessions::manager::get_session;
 
@@ -22,6 +22,12 @@ pub struct ListParams {
     limit: i64,
     #[serde(default)]
     offset: i64,
+}
+
+#[derive(Deserialize, Default)]
+pub struct MediaParams {
+    #[serde(default, rename = "reference")]
+    reference: bool,
 }
 
 fn default_limit() -> i64 {
@@ -79,7 +85,10 @@ pub async fn list_messages(
     ))
 }
 
-pub async fn get_media(Path((chat_id, local_id)): Path<(String, i64)>) -> Json<MediaResult> {
+pub async fn get_media(
+    Path((chat_id, local_id)): Path<(String, i64)>,
+    Query(params): Query<MediaParams>,
+) -> Json<MediaResult> {
     let session = match get_session("default") {
         Some(s) => s,
         None => {
@@ -131,13 +140,11 @@ pub async fn get_media(Path((chat_id, local_id)): Path<(String, i64)>) -> Json<M
         get_image_keys(&db, &session.id, &logged_in_user)
     };
 
-    Json(get_message_media(
-        &logged_in_user,
-        &keys,
-        &chat_id,
-        local_id,
-        image_keys,
-    ))
+    Json(if params.reference {
+        get_reference_media(&logged_in_user, &keys, &chat_id, local_id, image_keys)
+    } else {
+        get_message_media(&logged_in_user, &keys, &chat_id, local_id, image_keys)
+    })
 }
 
 #[derive(Deserialize)]

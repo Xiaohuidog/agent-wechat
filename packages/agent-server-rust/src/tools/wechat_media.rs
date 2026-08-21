@@ -435,6 +435,39 @@ fn find_dat_via_hardlink(
     None
 }
 
+fn reference_content(content: &str) -> Option<String> {
+    let refermsg = extract_xml_tag(content, "refermsg")?;
+    let encoded = extract_xml_tag(&refermsg, "content")?;
+    Some(encoded.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&").replace("&quot;", "\""))
+}
+
+/// Returns an image referenced by a reply when its local cache entry is available.
+pub fn get_reference_media(
+    account_dir: &str,
+    keys: &HashMap<String, String>,
+    chat_id: &str,
+    local_id: i64,
+    image_keys_raw: Option<(String, Option<u8>)>,
+) -> MediaResult {
+    let (_, _, content) = match lookup_message_raw(account_dir, keys, chat_id, local_id) {
+        Some(value) => value,
+        None => return unsupported(),
+    };
+    let referenced = match reference_content(&content) {
+        Some(value) if value.contains("<img") => value,
+        _ => return unsupported(),
+    };
+    let (aes_key_hex, xor_byte) = match image_keys_raw {
+        Some(value) => value,
+        None => return unsupported(),
+    };
+    let image_keys = ImageKeys { aes_key_hex, xor_byte };
+    match find_dat_via_hardlink(account_dir, keys, chat_id, &referenced) {
+        Some(path) => decrypt_and_return(&path, &image_keys, local_id),
+        None => pending(),
+    }
+}
+
 /// Look up the file hash for a message from message_resource.db.
 /// Returns the 32-char hex hash used in filenames on disk.
 fn find_file_hash_via_resource_db(

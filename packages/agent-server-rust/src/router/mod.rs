@@ -3,6 +3,7 @@ mod chats;
 mod contacts;
 mod debug;
 mod events;
+mod file_downloads;
 mod messages;
 mod sessions;
 mod status;
@@ -50,6 +51,17 @@ pub fn build_router() -> Router {
             get(messages::get_media),
         )
         .route("/api/messages/send", post(messages::send_message))
+        // Reliable file downloads
+        .route("/api/file-downloads", post(file_downloads::create))
+        .route("/api/file-downloads/{id}", get(file_downloads::get))
+        .route(
+            "/api/file-downloads/{id}/content",
+            get(file_downloads::content),
+        )
+        .route(
+            "/api/file-downloads/{id}/complete",
+            post(file_downloads::complete),
+        )
         // Debug
         .route("/api/debug/screenshot", get(debug::screenshot))
         .route("/api/debug/a11y", get(debug::a11y))

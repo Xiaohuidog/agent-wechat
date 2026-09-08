@@ -4,6 +4,7 @@
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -189,10 +190,14 @@ def parse_args():
 
 def main():
     args = parse_args()
-    expected_prefix = "/home/wechat/Downloads/agent-file-"
-    if not args.output.startswith(expected_prefix) or os.path.dirname(args.output) != "/home/wechat/Downloads":
+    output_pattern = re.compile(
+        r"^/home/[a-z_][a-z0-9_-]*/Downloads/agent-file-"
+        r"[0-9a-f]{8}-[0-9a-f-]{27}\.(pdf|docx|xlsx|zip)$"
+    )
+    if output_pattern.fullmatch(args.output) is None:
         fail("FILE_DOWNLOAD_OUTPUT_PATH_INVALID")
-    os.makedirs("/home/wechat/Downloads", mode=0o700, exist_ok=True)
+    download_dir = os.path.dirname(args.output)
+    os.makedirs(download_dir, mode=0o700, exist_ok=True)
     try:
         os.unlink(args.output)
     except FileNotFoundError:

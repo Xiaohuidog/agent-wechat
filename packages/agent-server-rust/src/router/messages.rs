@@ -79,29 +79,29 @@ pub async fn list_messages(
     ))
 }
 
-pub async fn get_media(Path((chat_id, local_id)): Path<(String, i64)>) -> Json<MediaResult> {
+pub async fn resolve_media(chat_id: &str, local_id: i64) -> MediaResult {
     let session = match get_session("default") {
         Some(s) => s,
         None => {
-            return Json(MediaResult {
+            return MediaResult {
                 media_type: "unsupported".to_string(),
                 data: None,
                 url: None,
                 format: String::new(),
                 filename: String::new(),
-            })
+            }
         }
     };
     let logged_in_user = match &session.logged_in_user {
         Some(u) => u.clone(),
         None => {
-            return Json(MediaResult {
+            return MediaResult {
                 media_type: "unsupported".to_string(),
                 data: None,
                 url: None,
                 format: String::new(),
                 filename: String::new(),
-            })
+            }
         }
     };
 
@@ -131,13 +131,17 @@ pub async fn get_media(Path((chat_id, local_id)): Path<(String, i64)>) -> Json<M
         get_image_keys(&db, &session.id, &logged_in_user)
     };
 
-    Json(get_message_media(
+    get_message_media(
         &logged_in_user,
         &keys,
-        &chat_id,
+        chat_id,
         local_id,
         image_keys,
-    ))
+    )
+}
+
+pub async fn get_media(Path((chat_id, local_id)): Path<(String, i64)>) -> Json<MediaResult> {
+    Json(resolve_media(&chat_id, local_id).await)
 }
 
 #[derive(Deserialize)]

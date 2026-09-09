@@ -22,6 +22,7 @@ const SUPPORTED_EXTENSIONS: &[&str] = &["pdf", "docx", "xlsx", "zip"];
 pub struct CreateRequest {
     idempotency_key: String,
     chat_id: String,
+    chat_name: String,
     local_id: i64,
     server_id: Option<String>,
     expected_filename: String,
@@ -34,6 +35,7 @@ pub struct Operation {
     id: String,
     idempotency_key: String,
     chat_id: String,
+    chat_name: String,
     local_id: i64,
     server_id: Option<String>,
     expected_filename: String,
@@ -51,7 +53,13 @@ fn validate(input: &CreateRequest) -> Result<String, &'static str> {
     if input.idempotency_key.is_empty() || input.idempotency_key.len() > 200 {
         return Err("FILE_DOWNLOAD_IDEMPOTENCY_KEY_INVALID");
     }
-    if input.chat_id.is_empty() || input.chat_id.len() > 200 || input.local_id < 0 {
+    if input.chat_id.is_empty()
+        || input.chat_id.len() > 200
+        || input.chat_name.trim().is_empty()
+        || input.chat_name.len() > 200
+        || input.chat_name.chars().any(char::is_control)
+        || input.local_id < 0
+    {
         return Err("FILE_DOWNLOAD_MESSAGE_ID_INVALID");
     }
     let filename = std::path::Path::new(&input.expected_filename)
@@ -78,6 +86,7 @@ fn validate(input: &CreateRequest) -> Result<String, &'static str> {
 
 fn same_identity(input: &CreateRequest, operation: &Operation) -> bool {
     input.chat_id == operation.chat_id
+        && input.chat_name == operation.chat_name
         && input.local_id == operation.local_id
         && input.server_id == operation.server_id
         && input.expected_filename == operation.expected_filename
@@ -86,7 +95,7 @@ fn same_identity(input: &CreateRequest, operation: &Operation) -> bool {
 fn load_operation(id: &str) -> Option<Operation> {
     let db = get_db();
     db.query_row(
-        "SELECT id, idempotency_key, chat_id, local_id, server_id,
+        "SELECT id, idempotency_key, chat_id, COALESCE(chat_name, ''), local_id, server_id,
                 expected_filename, sent_at, state, attempts, error_code,
                 size_bytes, created_at, updated_at, completed_at
          FROM file_download_operations WHERE id=?1",
@@ -96,17 +105,18 @@ fn load_operation(id: &str) -> Option<Operation> {
                 id: row.get(0)?,
                 idempotency_key: row.get(1)?,
                 chat_id: row.get(2)?,
-                local_id: row.get(3)?,
-                server_id: row.get(4)?,
-                expected_filename: row.get(5)?,
-                sent_at: row.get(6)?,
-                state: row.get(7)?,
-                attempts: row.get(8)?,
-                error_code: row.get(9)?,
-                size_bytes: row.get(10)?,
-                created_at: row.get(11)?,
-                updated_at: row.get(12)?,
-                completed_at: row.get(13)?,
+                chat_name: row.get(3)?,
+                local_id: row.get(4)?,
+                server_id: row.get(5)?,
+                expected_filename: row.get(6)?,
+                sent_at: row.get(7)?,
+                state: row.get(8)?,
+                attempts: row.get(9)?,
+                error_code: row.get(10)?,
+                size_bytes: row.get(11)?,
+                created_at: row.get(12)?,
+                updated_at: row.get(13)?,
+                completed_at: row.get(14)?,
             })
         },
     )
@@ -205,6 +215,8 @@ async fn run(id: String, extension: String) {
         &[
             "--chat-id",
             &operation.chat_id,
+            "--chat-name",
+            &operation.chat_name,
             "--local-id",
             &local_id,
             "--filename",
@@ -246,10 +258,11 @@ pub async fn create(Json(input): Json<CreateRequest>) -> Response {
         let db = get_db();
         if let Err(error) = db.execute(
             "INSERT INTO file_download_operations(
-                 id, idempotency_key, chat_id, local_id, server_id,
+                 id, idempotency_key, chat_id, chat_name, local_id, server_id,
                  expected_filename, sent_at, state
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,'queued')
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,'queued')
              ON CONFLICT(idempotency_key) DO UPDATE SET
+                 chat_name=excluded.chat_name,
                  state=CASE
                      WHEN file_download_operations.state IN ('ready','completed')
                          THEN file_download_operations.state
@@ -266,6 +279,7 @@ pub async fn create(Json(input): Json<CreateRequest>) -> Response {
                 id,
                 input.idempotency_key,
                 input.chat_id,
+                input.chat_name,
                 input.local_id,
                 input.server_id,
                 input.expected_filename,
@@ -410,6 +424,7 @@ mod tests {
         CreateRequest {
             idempotency_key: "groupbot-media-1".into(),
             chat_id: "123@chatroom".into(),
+            chat_name: "测试群".into(),
             local_id: 12,
             server_id: Some("9001".into()),
             expected_filename: filename.into(),
@@ -435,6 +450,7 @@ mod tests {
             id: "operation-1".into(),
             idempotency_key: input.idempotency_key.clone(),
             chat_id: input.chat_id.clone(),
+            chat_name: input.chat_name.clone(),
             local_id: input.local_id,
             server_id: input.server_id.clone(),
             expected_filename: input.expected_filename.clone(),

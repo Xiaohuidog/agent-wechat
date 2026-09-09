@@ -236,6 +236,25 @@ def find_chat_items(tree, chat_name):
     ]
 
 
+def choose_chat_item(matches):
+    if not matches:
+        return None
+    ranked = sorted(
+        matches,
+        key=lambda node: (
+            float(node["bounds"].get("height", 0)),
+            float(node["bounds"].get("width", 0)),
+        ),
+        reverse=True,
+    )
+    if len(ranked) > 1:
+        first_size = (ranked[0]["bounds"].get("height"), ranked[0]["bounds"].get("width"))
+        second_size = (ranked[1]["bounds"].get("height"), ranked[1]["bounds"].get("width"))
+        if first_size == second_size:
+            return None
+    return ranked[0]
+
+
 def find_search_input(tree):
     for node in walk_a11y(tree):
         if (
@@ -247,16 +266,27 @@ def find_search_input(tree):
     return None
 
 
-def click_bounds(bounds):
+def click_bounds(bounds, count=1):
     x = round(float(bounds["x"]) + float(bounds["width"]) / 2)
     y = round(float(bounds["y"]) + float(bounds["height"]) / 2)
-    result = subprocess.run(
-        ["/opt/tools/click", str(x), str(y)],
-        capture_output=True,
-        text=True,
-        timeout=5,
+    for _attempt in range(count):
+        result = subprocess.run(
+            ["/opt/tools/click", str(x), str(y)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return False
+        time.sleep(0.15)
+    return True
+
+
+def has_message_list(tree):
+    return any(
+        node.get("role") == "list" and node.get("name") == "Messages"
+        for node in walk_a11y(tree)
     )
-    return result.returncode == 0
 
 
 def select_by_chat_name(chat_name, timeout=12):
@@ -288,15 +318,23 @@ def select_by_chat_name(chat_name, timeout=12):
             if matches:
                 break
 
-    if len(matches) != 1:
+    selected_item = choose_chat_item(matches)
+    if selected_item is None:
         if used_search:
             subprocess.run(
                 ["/opt/tools/key", "Escape"], capture_output=True, text=True, timeout=5
             )
         return False, "CHAT_UI_AMBIGUOUS" if matches else "CHAT_UI_NOT_FOUND"
-    if not click_bounds(matches[0]["bounds"]):
+    if not click_bounds(selected_item["bounds"], count=2):
         return False, "CHAT_UI_CLICK_FAILED"
-    time.sleep(0.8)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        time.sleep(0.4)
+        tree = dump_a11y_tree()
+        if tree is not None and has_message_list(tree):
+            break
+    else:
+        return False, "CHAT_UI_OPEN_UNCONFIRMED"
     log(f"[chat-select] Selected chat by UI name: {chat_name!r}")
     return True, None
 

@@ -56,6 +56,28 @@ class ChatSelectUiFallbackTest(unittest.TestCase):
         self.assertEqual(exit_result.exception.code, 0)
         self.assertEqual(json.loads(output.getvalue())["method"], "a11y")
 
+    def test_message_list_confirms_chat_is_open(self):
+        self.assertTrue(
+            chat_select.has_message_list(
+                {"role": "list", "name": "Messages", "children": []}
+            )
+        )
+        self.assertFalse(
+            chat_select.has_message_list(
+                {"role": "list", "name": "Chats", "children": []}
+            )
+        )
+
+    def test_search_prefers_full_group_card_over_suggestion(self):
+        suggestion = {
+            "bounds": {"x": 273, "y": 184, "width": 320, "height": 34}
+        }
+        group_card = {
+            "bounds": {"x": 273, "y": 386, "width": 320, "height": 64}
+        }
+
+        self.assertIs(chat_select.choose_chat_item([suggestion, group_card]), group_card)
+
 
 if __name__ == "__main__":
     unittest.main()

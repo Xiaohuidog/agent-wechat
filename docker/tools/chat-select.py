@@ -183,6 +183,124 @@ def find_chat_item_from_a11y():
         return None
 
 
+def dump_a11y_tree():
+    """Return the current desktop accessibility tree."""
+    try:
+        result = subprocess.run(
+            ["/opt/tools/a11y-dump", "--format", "json"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={
+                **os.environ,
+                "QT_ACCESSIBILITY": "1",
+                "QT_LINUX_ACCESSIBILITY_ALWAYS_ON": "1",
+            },
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        log(f"[chat-select] a11y-dump failed: {error}")
+        return None
+    if result.returncode != 0:
+        log(f"[chat-select] a11y-dump failed: {result.stderr.strip()}")
+        return None
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError:
+        log("[chat-select] a11y-dump returned invalid JSON")
+        return None
+
+
+def walk_a11y(node):
+    if isinstance(node, dict):
+        yield node
+        for child in node.get("children") or []:
+            yield from walk_a11y(child)
+    elif isinstance(node, list):
+        for child in node:
+            yield from walk_a11y(child)
+
+
+def chat_name_from_item(node):
+    name = node.get("name")
+    if node.get("role") != "list-item" or not isinstance(name, str):
+        return None
+    lines = name.splitlines()
+    return lines[0].strip() if lines else None
+
+
+def find_chat_items(tree, chat_name):
+    return [
+        node
+        for node in walk_a11y(tree)
+        if chat_name_from_item(node) == chat_name and node.get("bounds")
+    ]
+
+
+def find_search_input(tree):
+    for node in walk_a11y(tree):
+        if (
+            node.get("role") == "text"
+            and node.get("name") == "Search"
+            and node.get("bounds")
+        ):
+            return node
+    return None
+
+
+def click_bounds(bounds):
+    x = round(float(bounds["x"]) + float(bounds["width"]) / 2)
+    y = round(float(bounds["y"]) + float(bounds["height"]) / 2)
+    result = subprocess.run(
+        ["/opt/tools/click", str(x), str(y)],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    return result.returncode == 0
+
+
+def select_by_chat_name(chat_name, timeout=12):
+    """Select a chat through the UI without relying on binary offsets."""
+    tree = dump_a11y_tree()
+    if tree is None:
+        return False, "CHAT_UI_UNAVAILABLE"
+
+    matches = find_chat_items(tree, chat_name)
+    used_search = False
+    if not matches:
+        search = find_search_input(tree)
+        if search is None or not click_bounds(search["bounds"]):
+            return False, "CHAT_SEARCH_UNAVAILABLE"
+        subprocess.run(
+            ["/opt/tools/key", "ctrl+a"], capture_output=True, text=True, timeout=5
+        )
+        typed = subprocess.run(
+            ["/opt/tools/input", chat_name], capture_output=True, text=True, timeout=5
+        )
+        if typed.returncode != 0:
+            return False, "CHAT_SEARCH_INPUT_FAILED"
+        used_search = True
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            time.sleep(0.4)
+            tree = dump_a11y_tree()
+            matches = find_chat_items(tree, chat_name) if tree is not None else []
+            if matches:
+                break
+
+    if len(matches) != 1:
+        if used_search:
+            subprocess.run(
+                ["/opt/tools/key", "Escape"], capture_output=True, text=True, timeout=5
+            )
+        return False, "CHAT_UI_AMBIGUOUS" if matches else "CHAT_UI_NOT_FOUND"
+    if not click_bounds(matches[0]["bounds"]):
+        return False, "CHAT_UI_CLICK_FAILED"
+    time.sleep(0.8)
+    log(f"[chat-select] Selected chat by UI name: {chat_name!r}")
+    return True, None
+
+
 def _find_chat_list_items(node, items, in_chat_list):
     """Recursively find list-item nodes inside the Chats list."""
     if not node or not isinstance(node, dict):
@@ -575,13 +693,14 @@ var hook = Interceptor.attach(addr, {{
 
 
 def main():
-    # Parse args: chat-select [--force] [--click-xy X Y] [--list] <username>
+    # Parse args: chat-select [--chat-name NAME] [--force] [--list] <username>
     args = sys.argv[1:]
     if not args:
         result_json(False, error="Usage: chat-select [--force] [--click-xy X Y] <username> | chat-select --list")
 
     force = False
     click_xy = None
+    chat_name = None
     positional = []
 
     i = 0
@@ -594,6 +713,11 @@ def main():
                 result_json(False, error="--click-xy requires X Y arguments")
             click_xy = (int(args[i + 1]), int(args[i + 2]))
             i += 3
+        elif args[i] == "--chat-name":
+            if i + 1 >= len(args):
+                result_json(False, error="--chat-name requires a value", errorCode="CHAT_NAME_REQUIRED")
+            chat_name = args[i + 1]
+            i += 2
         else:
             positional.append(args[i])
             i += 1
@@ -606,9 +730,17 @@ def main():
         result_json(False, error="WeChat is not running")
     log(f"[chat-select] WeChat PID={pid}")
 
+    # Prefer the accessibility path. It is independent of the WeChat ELF
+    # BuildID and therefore survives routine client upgrades.
+    if chat_name and positional[0] != "--list":
+        selected, ui_error = select_by_chat_name(chat_name)
+        if selected:
+            result_json(True, username=positional[0], chatName=chat_name, method="a11y")
+        log(f"[chat-select] UI selection failed: {ui_error}; trying binary profile")
+
     profile, err = get_profile(pid)
     if not profile:
-        result_json(False, error=err)
+        result_json(False, error=err, errorCode=ui_error if chat_name else "CHAT_BUILD_UNSUPPORTED")
 
     # Enumerate sessions
     log("[chat-select] Enumerating sessions...")

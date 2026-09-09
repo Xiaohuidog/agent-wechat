@@ -20,12 +20,22 @@ def fail(code):
 
 
 def command(*args, timeout=15, check=True):
+    command_name = os.path.basename(str(args[0])).upper().replace("-", "_")
+    if command_name == "XDOTOOL" and len(args) > 1:
+        command_name = f"XDOTOOL_{str(args[1]).upper().replace('-', '_')}"
     try:
         result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as error:
-        raise DownloadError("FILE_DOWNLOAD_COMMAND_TIMEOUT") from error
+        raise DownloadError(f"{command_name}_TIMEOUT") from error
     if check and result.returncode != 0:
-        raise DownloadError("FILE_DOWNLOAD_COMMAND_FAILED")
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            payload = {}
+        error_code = payload.get("errorCode") if isinstance(payload, dict) else None
+        if isinstance(error_code, str) and error_code:
+            raise DownloadError(error_code)
+        raise DownloadError(f"{command_name}_FAILED")
     return result
 
 
@@ -84,19 +94,27 @@ def weixin_geometry():
     window_ids = [value for value in result.stdout.splitlines() if value.isdigit()]
     if not window_ids:
         raise DownloadError("WEIXIN_WINDOW_NOT_VISIBLE")
-    window_id = window_ids[-1]
+    candidates = []
+    for candidate_id in window_ids:
+        geometry = command(
+            "xdotool", "getwindowgeometry", "--shell", candidate_id, check=False
+        )
+        if geometry.returncode != 0:
+            continue
+        values = {}
+        for line in geometry.stdout.splitlines():
+            key, separator, value = line.partition("=")
+            if separator and key in {"X", "Y", "WIDTH", "HEIGHT"} and value.lstrip("-").isdigit():
+                values[key] = int(value)
+        if set(values) == {"X", "Y", "WIDTH", "HEIGHT"}:
+            candidates.append((values["WIDTH"] * values["HEIGHT"], candidate_id, values))
+    if not candidates:
+        raise DownloadError("WEIXIN_WINDOW_GEOMETRY_INVALID")
+    _area, window_id, values = max(candidates, key=lambda candidate: candidate[0])
     command("xdotool", "windowactivate", "--sync", window_id)
     active = command("xdotool", "getactivewindow").stdout.strip()
     if active != window_id:
         raise DownloadError("WEIXIN_WINDOW_NOT_ACTIVE")
-    geometry = command("xdotool", "getwindowgeometry", "--shell", window_id)
-    values = {}
-    for line in geometry.stdout.splitlines():
-        key, separator, value = line.partition("=")
-        if separator and key in {"X", "Y", "WIDTH", "HEIGHT"} and value.lstrip("-").isdigit():
-            values[key] = int(value)
-    if set(values) != {"X", "Y", "WIDTH", "HEIGHT"}:
-        raise DownloadError("WEIXIN_WINDOW_GEOMETRY_INVALID")
     if values["WIDTH"] < 700 or values["HEIGHT"] < 500:
         raise DownloadError("WEIXIN_WINDOW_TOO_SMALL")
     return values
@@ -106,7 +124,7 @@ def scroll(geometry, button, repeat=4):
     target_x = round(geometry["X"] + geometry["WIDTH"] * 0.72)
     target_y = round(geometry["Y"] + geometry["HEIGHT"] * 0.48)
     command(
-        "xdotool", "mousemove", "--sync", str(target_x), str(target_y),
+        "xdotool", "mousemove", str(target_x), str(target_y),
         "click", "--repeat", str(repeat), "--delay", "60", button,
     )
     time.sleep(0.25)
@@ -182,6 +200,7 @@ def wait_for_complete(path):
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--chat-id", required=True)
+    parser.add_argument("--chat-name", required=True)
     parser.add_argument("--local-id", required=True, type=int)
     parser.add_argument("--filename", required=True)
     parser.add_argument("--output", required=True)
@@ -204,7 +223,13 @@ def main():
         pass
 
     try:
-        selected = command("/opt/tools/chat-select", args.chat_id, timeout=60)
+        selected = command(
+            "/opt/tools/chat-select",
+            "--chat-name",
+            args.chat_name,
+            args.chat_id,
+            timeout=60,
+        )
         try:
             selected_result = json.loads(selected.stdout)
         except json.JSONDecodeError as error:
@@ -217,18 +242,18 @@ def main():
         bounds = row["bounds"]
         x = round(float(bounds["x"]) + min(227, float(bounds["width"]) / 4))
         y = center(bounds)[1]
-        command("xdotool", "mousemove", "--sync", str(x), str(y), "click", "3")
+        command("xdotool", "mousemove", str(x), str(y), "click", "3")
         time.sleep(0.5)
         save_as = named_node(tree(), "menu-item", {"Save as…", "Save as..."})
-        command("xdotool", "mousemove", "--sync", *map(str, center(save_as["bounds"])), "click", "1")
+        command("xdotool", "mousemove", *map(str, center(save_as["bounds"])), "click", "1")
         time.sleep(0.7)
         dialog = tree()
         filename_input = named_node(dialog, "text", {"File name:"})
         save_button = named_node(dialog, "push-button", {"Save"})
-        command("xdotool", "mousemove", "--sync", *map(str, center(filename_input["bounds"])), "click", "1")
+        command("xdotool", "mousemove", *map(str, center(filename_input["bounds"])), "click", "1")
         command("xdotool", "key", "--clearmodifiers", "ctrl+a")
         command("xdotool", "type", "--delay", "1", "--", args.output)
-        command("xdotool", "mousemove", "--sync", *map(str, center(save_button["bounds"])), "click", "1")
+        command("xdotool", "mousemove", *map(str, center(save_button["bounds"])), "click", "1")
         size = wait_for_complete(args.output)
     except DownloadError as error:
         fail(str(error))

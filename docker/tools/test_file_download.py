@@ -34,6 +34,27 @@ class WeixinGeometryTest(unittest.TestCase):
 
         self.assertEqual(geometry, {"X": 200, "Y": 80, "WIDTH": 880, "HEIGHT": 640})
 
+    def test_find_row_tolerates_delayed_a11y_refresh(self):
+        empty_tree = {"children": []}
+        target = {
+            "role": "list-item",
+            "name": "File\n报告.docx\n12K\n微信电脑版",
+            "bounds": {"x": 501, "y": 200, "width": 578, "height": 120},
+        }
+        with (
+            mock.patch.object(
+                file_download,
+                "tree",
+                side_effect=[empty_tree, empty_tree, empty_tree, empty_tree, target],
+            ),
+            mock.patch.object(file_download, "scroll"),
+        ):
+            row = file_download.find_row(
+                "报告.docx", {"X": 200, "Y": 80, "WIDTH": 880, "HEIGHT": 640}
+            )
+
+        self.assertEqual(row, target)
+
 
 if __name__ == "__main__":
     unittest.main()

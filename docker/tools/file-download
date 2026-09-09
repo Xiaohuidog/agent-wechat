@@ -127,7 +127,7 @@ def scroll(geometry, button, repeat=4):
         "xdotool", "mousemove", str(target_x), str(target_y),
         "click", "--repeat", str(repeat), "--delay", "60", button,
     )
-    time.sleep(0.25)
+    time.sleep(0.6)
 
 
 def find_row(filename, geometry, timeout_seconds=240):
@@ -144,7 +144,7 @@ def find_row(filename, geometry, timeout_seconds=240):
         bottom = top + float(bounds["height"])
         if top >= safe_top and bottom <= safe_bottom:
             return rows[0]
-        scroll(geometry, "4" if top < safe_top else "5")
+        scroll(geometry, "4" if top < safe_top else "5", repeat=1)
 
     for _ in range(4):
         if time.monotonic() >= deadline:
@@ -162,7 +162,7 @@ def find_row(filename, geometry, timeout_seconds=240):
             bottom = top + float(bounds["height"])
             if top >= safe_top and bottom <= safe_bottom:
                 return rows[0]
-            scroll(geometry, "4" if top < safe_top else "5")
+            scroll(geometry, "4" if top < safe_top else "5", repeat=1)
             continue
         signature = tuple(
             (str(node.get("name")), round(float((node.get("bounds") or {}).get("y", 0))))
@@ -171,7 +171,7 @@ def find_row(filename, geometry, timeout_seconds=240):
         )
         repeated = repeated + 1 if signature == last_signature else 0
         last_signature = signature
-        if repeated >= 2:
+        if repeated >= 8:
             break
         scroll(geometry, "4")
     raise DownloadError("FILE_CARD_NOT_FOUND_AFTER_SCROLL")
@@ -223,6 +223,7 @@ def main():
         pass
 
     try:
+        geometry = weixin_geometry()
         selected = command(
             "/opt/tools/chat-select",
             "--chat-name",
@@ -237,7 +238,6 @@ def main():
         if not selected_result.get("ok"):
             raise DownloadError("CHAT_OPEN_FAILED")
         time.sleep(1)
-        geometry = weixin_geometry()
         row = find_row(args.filename, geometry)
         bounds = row["bounds"]
         x = round(float(bounds["x"]) + min(227, float(bounds["width"]) / 4))

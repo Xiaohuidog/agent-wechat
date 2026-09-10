@@ -6,14 +6,12 @@ use axum::{
 };
 use base64::Engine;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::db::get_db;
 use crate::sessions::manager::get_session;
 use crate::tools::exec::{exec_command, ExecOptions};
 
-static FILE_DOWNLOAD_LOCK: Mutex<()> = Mutex::const_new(());
 const ACTIVE_TIMEOUT: &str = "-10 minutes";
 const SUPPORTED_EXTENSIONS: &[&str] = &["pdf", "docx", "xlsx", "zip"];
 
@@ -153,7 +151,7 @@ fn schedule(id: String, extension: String) {
 }
 
 async fn run(id: String, extension: String) {
-    let _guard = FILE_DOWNLOAD_LOCK.lock().await;
+    let _guard = super::ui_lock::UI_OPERATION_LOCK.lock().await;
     let claimed = {
         let db = get_db();
         db.execute(

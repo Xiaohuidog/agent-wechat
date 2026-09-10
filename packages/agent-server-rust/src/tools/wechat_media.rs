@@ -4,8 +4,9 @@ use crate::tools::wechat_messages::{decode_message_content, extract_xml_tag, fin
 use md5::{Digest, Md5};
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::UNIX_EPOCH;
 
 /// WeChat .dat file magic bytes: 07 08 56 32 08 07
 const DAT_MAGIC: [u8; 6] = [0x07, 0x08, 0x56, 0x32, 0x08, 0x07];
@@ -509,6 +510,75 @@ fn find_dat_via_resource_db(
     None
 }
 
+/// Resolve a cache file when the resource database cannot be read. The match
+/// must be unique within the same chat directory and a narrow receive-time
+/// window; otherwise fail closed instead of returning another message's image.
+fn find_unique_dat_by_time(image_dir: &Path, create_time: i64) -> Option<PathBuf> {
+    const BEFORE_SECONDS: i64 = 5;
+    const AFTER_SECONDS: i64 = 10;
+
+    let mut candidates: HashMap<String, (Option<PathBuf>, Option<PathBuf>)> = HashMap::new();
+    for entry in fs::read_dir(image_dir).ok()?.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        let (stem, is_thumbnail) = if let Some(stem) = name.strip_suffix("_t.dat") {
+            (stem, true)
+        } else if let Some(stem) = name.strip_suffix(".dat") {
+            (stem, false)
+        } else {
+            continue;
+        };
+        let modified = entry
+            .metadata()
+            .ok()?
+            .modified()
+            .ok()?
+            .duration_since(UNIX_EPOCH)
+            .ok()?
+            .as_secs() as i64;
+        if modified < create_time.saturating_sub(BEFORE_SECONDS)
+            || modified > create_time.saturating_add(AFTER_SECONDS)
+        {
+            continue;
+        }
+        let candidate = candidates.entry(stem.to_string()).or_default();
+        if is_thumbnail {
+            candidate.1 = Some(path);
+        } else {
+            candidate.0 = Some(path);
+        }
+    }
+
+    if candidates.len() != 1 {
+        return None;
+    }
+    let (full, thumbnail) = candidates.into_values().next()?;
+    full.or(thumbnail)
+}
+
+fn find_dat_via_timestamp(
+    account_dir: &str,
+    chat_id: &str,
+    create_time: i64,
+) -> Option<String> {
+    let chat_hash = format!("{:x}", Md5::digest(chat_id.as_bytes()));
+    let year_month = chrono::DateTime::from_timestamp(create_time, 0)?
+        .format("%Y-%m")
+        .to_string();
+
+    for base in &account_base_paths(account_dir) {
+        let image_dir = Path::new(base)
+            .join("msg/attach")
+            .join(&chat_hash)
+            .join(&year_month)
+            .join("Img");
+        if let Some(path) = find_unique_dat_by_time(&image_dir, create_time) {
+            return Some(path.to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
 /// Get video data: .mp4 if downloaded, otherwise cover .jpg or _thumb.jpg.
 /// Videos are stored unencrypted at msg/video/{YYYY-MM}/{hash}.mp4
 fn get_video_data(
@@ -970,6 +1040,13 @@ pub fn get_message_media(
                     return decrypt_and_return(&dat_path, &image_keys, local_id);
                 }
 
+                if let Some(dat_path) =
+                    find_dat_via_timestamp(account_dir, chat_id, create_time)
+                {
+                    tracing::info!("[media] found unique timestamp fallback for local_id={}", local_id);
+                    return decrypt_and_return(&dat_path, &image_keys, local_id);
+                }
+
                 tracing::warn!(
                     "[media] no dat found for local_id={}, md5={}",
                     local_id, xml_attr(&content, "md5").unwrap_or_default()
@@ -1008,5 +1085,57 @@ pub fn get_message_media(
             }
             unsupported()
         }
+    }
+}
+
+#[cfg(test)]
+mod timestamp_fallback_tests {
+    use super::find_unique_dat_by_time;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tempfile::TempDir;
+
+    fn now_seconds() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    }
+
+    #[test]
+    fn returns_the_only_image_written_near_the_message_time() {
+        let temporary = TempDir::new().unwrap();
+        let thumbnail = temporary.path().join("image-a_t.dat");
+        fs::write(&thumbnail, b"thumbnail").unwrap();
+
+        assert_eq!(
+            find_unique_dat_by_time(temporary.path(), now_seconds()),
+            Some(thumbnail)
+        );
+    }
+
+    #[test]
+    fn rejects_two_distinct_images_in_the_same_time_window() {
+        let temporary = TempDir::new().unwrap();
+        fs::write(temporary.path().join("image-a_t.dat"), b"first").unwrap();
+        fs::write(temporary.path().join("image-b_t.dat"), b"second").unwrap();
+
+        assert_eq!(
+            find_unique_dat_by_time(temporary.path(), now_seconds()),
+            None
+        );
+    }
+
+    #[test]
+    fn prefers_full_image_over_thumbnail_with_the_same_hash() {
+        let temporary = TempDir::new().unwrap();
+        let full = temporary.path().join("image-a.dat");
+        fs::write(&full, b"full").unwrap();
+        fs::write(temporary.path().join("image-a_t.dat"), b"thumbnail").unwrap();
+
+        assert_eq!(
+            find_unique_dat_by_time(temporary.path(), now_seconds()),
+            Some(full)
+        );
     }
 }

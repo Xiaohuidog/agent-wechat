@@ -16,6 +16,12 @@ struct ImageKeys {
     xor_byte: Option<u8>,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub struct ImageDownloadCacheTarget {
+    pub image_dir: PathBuf,
+    pub stem: String,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ImageDatVariant {
     HighResolution,
@@ -81,6 +87,15 @@ fn image_dat_variant_path(dat_path: &Path, variant: ImageDatVariant) -> Option<P
         ImageDatVariant::Thumbnail => "_t.dat",
     };
     Some(dat_path.parent()?.join(format!("{stem}{suffix}")))
+}
+
+fn image_download_cache_target(dat_path: &Path) -> Option<(PathBuf, String)> {
+    let name = dat_path.file_name()?.to_str()?;
+    let (stem, variant) = parse_image_dat_name(name)?;
+    if variant != ImageDatVariant::Thumbnail {
+        return None;
+    }
+    Some((dat_path.parent()?.to_path_buf(), stem.to_string()))
 }
 
 fn account_base_paths(account_dir: &str) -> [String; 2] {
@@ -628,6 +643,27 @@ fn find_dat_via_timestamp(
     None
 }
 
+/// Resolve the exact thumbnail cache identity that a UI fetch must upgrade.
+/// A medium or high-resolution file means no UI action is needed; an ambiguous
+/// timestamp match returns None and therefore cannot produce a click target.
+pub fn get_image_download_cache_target(
+    account_dir: &str,
+    keys: &HashMap<String, String>,
+    chat_id: &str,
+    local_id: i64,
+) -> Option<ImageDownloadCacheTarget> {
+    let (local_type, create_time, content) =
+        lookup_message_raw(account_dir, keys, chat_id, local_id)?;
+    if (local_type & 0xFFFF_FFFF) as i32 != 3 {
+        return None;
+    }
+    let path = find_dat_via_resource_db(account_dir, keys, chat_id, local_id, create_time)
+        .or_else(|| find_dat_via_hardlink(account_dir, keys, chat_id, &content))
+        .or_else(|| find_dat_via_timestamp(account_dir, chat_id, create_time))?;
+    let (image_dir, stem) = image_download_cache_target(Path::new(&path))?;
+    Some(ImageDownloadCacheTarget { image_dir, stem })
+}
+
 /// Get video data: .mp4 if downloaded, otherwise cover .jpg or _thumb.jpg.
 /// Videos are stored unencrypted at msg/video/{YYYY-MM}/{hash}.mp4
 fn get_video_data(
@@ -1144,8 +1180,8 @@ pub fn get_message_media(
 #[cfg(test)]
 mod timestamp_fallback_tests {
     use super::{
-        find_best_image_dat, find_unique_dat_by_time, image_dat_variant_path, image_filename,
-        ImageDatVariant,
+        find_best_image_dat, find_unique_dat_by_time, image_dat_variant_path,
+        image_download_cache_target, image_filename, ImageDatVariant,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1240,5 +1276,17 @@ mod timestamp_fallback_tests {
     fn labels_thumbnail_filenames_without_relying_on_dimensions() {
         assert_eq!(image_filename(42, "jpg", true), "msg_42_thumb.jpg");
         assert_eq!(image_filename(42, "jpg", false), "msg_42.jpg");
+    }
+
+    #[test]
+    fn derives_a_download_target_only_from_an_exact_thumbnail_variant() {
+        let thumbnail = Path::new("/tmp/image-a_t.dat");
+        let medium = Path::new("/tmp/image-a.dat");
+
+        assert_eq!(
+            image_download_cache_target(thumbnail),
+            Some((PathBuf::from("/tmp"), "image-a".to_string()))
+        );
+        assert_eq!(image_download_cache_target(medium), None);
     }
 }

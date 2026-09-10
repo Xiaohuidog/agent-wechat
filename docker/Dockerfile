@@ -44,7 +44,7 @@ RUN apt-get update && apt-get install -y \
     # Input automation
     xdotool scrot \
     # Accessibility
-    at-spi2-core gir1.2-atspi-2.0 python3 python3-gi \
+    at-spi2-core gir1.2-atspi-2.0 python3 python3-gi python3-pil \
     # Notifications
     dunst libnotify-bin \
     # Fonts

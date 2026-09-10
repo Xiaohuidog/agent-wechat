@@ -4,10 +4,12 @@ mod contacts;
 mod debug;
 mod events;
 mod file_downloads;
+mod image_downloads;
 mod messages;
 mod sessions;
 mod status;
 mod vnc;
+mod ui_lock;
 
 use axum::{
     extract::DefaultBodyLimit,
@@ -62,6 +64,9 @@ pub fn build_router() -> Router {
             "/api/file-downloads/{id}/complete",
             post(file_downloads::complete),
         )
+        // Reliable image downloads
+        .route("/api/image-downloads", post(image_downloads::create))
+        .route("/api/image-downloads/{id}", get(image_downloads::get))
         // Debug
         .route("/api/debug/screenshot", get(debug::screenshot))
         .route("/api/debug/a11y", get(debug::a11y))

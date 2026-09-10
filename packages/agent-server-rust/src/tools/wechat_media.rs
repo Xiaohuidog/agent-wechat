@@ -36,6 +36,14 @@ fn pending() -> MediaResult {
     }
 }
 
+fn image_filename(local_id: i64, extension: &str, thumbnail: bool) -> String {
+    if thumbnail {
+        format!("msg_{local_id}_thumb.{extension}")
+    } else {
+        format!("msg_{local_id}.{extension}")
+    }
+}
+
 fn account_base_paths(account_dir: &str) -> [String; 2] {
     [
         format!("/home/wechat/xwechat_files/{account_dir}"),
@@ -139,7 +147,7 @@ fn get_image_thumbnail(
                     )),
                     url: None,
                     format: "jpeg".into(),
-                    filename: format!("msg_{local_id}.jpg"),
+                    filename: image_filename(local_id, "jpg", true),
                 });
             }
         }
@@ -165,7 +173,7 @@ fn get_image_thumbnail(
                             )),
                             url: None,
                             format: "jpeg".into(),
-                            filename: format!("msg_{local_id}.jpg"),
+                            filename: image_filename(local_id, "jpg", true),
                         });
                     }
                 }
@@ -691,6 +699,7 @@ fn decrypt_and_return(
     image_keys: &ImageKeys,
     local_id: i64,
 ) -> MediaResult {
+    let is_thumbnail = dat_path.ends_with("_t.dat");
     let dat = match fs::read(dat_path) {
         Ok(d) => d,
         Err(_) => {
@@ -699,7 +708,7 @@ fn decrypt_and_return(
                 data: None,
                 url: None,
                 format: "jpeg".into(),
-                filename: format!("msg_{local_id}.jpg"),
+                filename: image_filename(local_id, "jpg", is_thumbnail),
             }
         }
     };
@@ -712,7 +721,7 @@ fn decrypt_and_return(
                 data: None,
                 url: None,
                 format: "jpeg".into(),
-                filename: format!("msg_{local_id}.jpg"),
+                filename: image_filename(local_id, "jpg", is_thumbnail),
             }
         }
     };
@@ -725,7 +734,7 @@ fn decrypt_and_return(
                 data: None,
                 url: None,
                 format: "jpeg".into(),
-                filename: format!("msg_{local_id}.jpg"),
+                filename: image_filename(local_id, "jpg", is_thumbnail),
             }
         }
     };
@@ -748,7 +757,7 @@ fn decrypt_and_return(
                 )),
                 url: None,
                 format: cfmt,
-                filename: format!("msg_{local_id}.{cext}"),
+                filename: image_filename(local_id, &cext, is_thumbnail),
             };
         }
         // Try _t.dat thumbnail
@@ -768,7 +777,7 @@ fn decrypt_and_return(
                             )),
                             url: None,
                             format: tf.into(),
-                            filename: format!("msg_{local_id}.{te}"),
+                            filename: image_filename(local_id, te, true),
                         };
                     }
                 }
@@ -784,7 +793,7 @@ fn decrypt_and_return(
         )),
         url: None,
         format: format.into(),
-        filename: format!("msg_{local_id}.{ext}"),
+        filename: image_filename(local_id, ext, is_thumbnail),
     }
 }
 
@@ -1009,17 +1018,8 @@ pub fn get_message_media(
                 chat_id, local_id, create_time, content.len()
             );
 
-            // Try cached thumbnail first
-            if let Some(thumb) =
-                get_image_thumbnail(account_dir, chat_id, local_id, create_time)
-            {
-                tracing::info!("[media] found thumbnail for local_id={}", local_id);
-                return thumb;
-            }
-            tracing::info!("[media] no thumbnail for local_id={}", local_id);
-
-
-            // Try .dat decryption if we have image keys
+            // Prefer the non-thumbnail .dat file. A cached thumbnail is only a
+            // temporary fallback while WeChat is still materializing the image.
             if let Some((aes_hex, xor_byte)) = image_keys_raw {
                 let image_keys = ImageKeys {
                     aes_key_hex: aes_hex,
@@ -1054,6 +1054,14 @@ pub fn get_message_media(
             } else {
                 tracing::warn!("[media] no image keys available for local_id={}", local_id);
             }
+
+            if let Some(thumb) =
+                get_image_thumbnail(account_dir, chat_id, local_id, create_time)
+            {
+                tracing::info!("[media] using thumbnail fallback for local_id={}", local_id);
+                return thumb;
+            }
+            tracing::info!("[media] no thumbnail fallback for local_id={}", local_id);
 
             // Image exists but can't be retrieved
             MediaResult {
@@ -1090,7 +1098,7 @@ pub fn get_message_media(
 
 #[cfg(test)]
 mod timestamp_fallback_tests {
-    use super::find_unique_dat_by_time;
+    use super::{find_unique_dat_by_time, image_filename};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tempfile::TempDir;
@@ -1137,5 +1145,11 @@ mod timestamp_fallback_tests {
             find_unique_dat_by_time(temporary.path(), now_seconds()),
             Some(full)
         );
+    }
+
+    #[test]
+    fn labels_thumbnail_filenames_without_relying_on_dimensions() {
+        assert_eq!(image_filename(42, "jpg", true), "msg_42_thumb.jpg");
+        assert_eq!(image_filename(42, "jpg", false), "msg_42.jpg");
     }
 }

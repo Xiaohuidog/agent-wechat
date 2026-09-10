@@ -325,7 +325,7 @@ def select_by_chat_name(chat_name, timeout=12):
                 ["/opt/tools/key", "Escape"], capture_output=True, text=True, timeout=5
             )
         return False, "CHAT_UI_AMBIGUOUS" if matches else "CHAT_UI_NOT_FOUND"
-    if not click_bounds(selected_item["bounds"], count=2):
+    if not click_bounds(selected_item["bounds"], count=1):
         return False, "CHAT_UI_CLICK_FAILED"
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:

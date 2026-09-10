@@ -68,6 +68,29 @@ class ChatSelectUiFallbackTest(unittest.TestCase):
             )
         )
 
+    def test_accessible_chat_selection_clicks_once(self):
+        bounds = {"x": 261, "y": 226, "width": 240, "height": 65}
+        trees = iter(
+            [
+                {
+                    "role": "list-item",
+                    "name": "群测试\n成员: [Video]",
+                    "bounds": bounds,
+                },
+                {"role": "list", "name": "Messages", "children": []},
+            ]
+        )
+        with (
+            mock.patch.object(chat_select, "dump_a11y_tree", side_effect=trees),
+            mock.patch.object(chat_select, "click_bounds", return_value=True) as click,
+            mock.patch.object(chat_select.time, "sleep"),
+        ):
+            selected, error = chat_select.select_by_chat_name("群测试")
+
+        self.assertTrue(selected)
+        self.assertIsNone(error)
+        click.assert_called_once_with(bounds, count=1)
+
     def test_search_prefers_full_group_card_over_suggestion(self):
         suggestion = {
             "bounds": {"x": 273, "y": 184, "width": 320, "height": 34}

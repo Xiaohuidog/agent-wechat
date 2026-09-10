@@ -2,7 +2,7 @@ use crate::ia::types::MediaResult;
 use crate::tools::wechat_db::{get_db_path, query_wechat_db};
 use crate::tools::wechat_messages::{decode_message_content, extract_xml_tag, find_message_db, get_msg_table_name};
 use md5::{Digest, Md5};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -587,6 +587,54 @@ fn find_dat_via_timestamp(
     None
 }
 
+/// Resolve a video hash from files written at the message receive time when
+/// message_resource.db is unavailable. Multiple distinct hashes fail closed.
+fn find_unique_video_hash_by_time(video_dir: &Path, create_time: i64) -> Option<String> {
+    const BEFORE_SECONDS: i64 = 5;
+    const AFTER_SECONDS: i64 = 5;
+
+    let mut candidates = HashSet::new();
+    for entry in fs::read_dir(video_dir).ok()?.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let modified = path
+            .metadata()
+            .ok()?
+            .modified()
+            .ok()?
+            .duration_since(UNIX_EPOCH)
+            .ok()?
+            .as_secs() as i64;
+        if modified < create_time.saturating_sub(BEFORE_SECONDS)
+            || modified > create_time.saturating_add(AFTER_SECONDS)
+        {
+            continue;
+        }
+
+        let filename = path.file_name()?.to_str()?;
+        let hash = filename
+            .strip_suffix("_thumb.jpg")
+            .or_else(|| filename.strip_suffix(".jpg"))
+            .or_else(|| filename.strip_suffix(".mp4"));
+        if let Some(hash) = hash {
+            if hash.len() == 32
+                && hash
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                candidates.insert(hash.to_string());
+            }
+        }
+    }
+
+    if candidates.len() != 1 {
+        return None;
+    }
+    candidates.into_iter().next()
+}
+
 /// Get video data: .mp4 if downloaded, otherwise cover .jpg or _thumb.jpg.
 /// Videos are stored unencrypted at msg/video/{YYYY-MM}/{hash}.mp4
 fn get_video_data(
@@ -603,7 +651,20 @@ fn get_video_data(
     let year_month = dt.format("%Y-%m").to_string();
 
     // Try to get file hash from message_resource.db
-    let file_hash = find_file_hash_via_resource_db(account_dir, keys, chat_id, local_id);
+    let file_hash =
+        find_file_hash_via_resource_db(account_dir, keys, chat_id, local_id).or_else(|| {
+            for base in &account_base_paths(account_dir) {
+                let video_dir = Path::new(base).join("msg/video").join(&year_month);
+                if let Some(hash) = find_unique_video_hash_by_time(&video_dir, create_time) {
+                    tracing::info!(
+                        "[media:video] recovered unique timestamp hash for local_id={}",
+                        local_id
+                    );
+                    return Some(hash);
+                }
+            }
+            None
+        });
 
     if let Some(ref hash) = file_hash {
         for base in &account_base_paths(account_dir) {
@@ -1157,7 +1218,9 @@ mod timestamp_fallback_tests {
     fn recovers_unique_video_hash_from_thumbnail_timestamp() {
         let temporary = TempDir::new().unwrap();
         fs::write(
-            temporary.path().join("fb53192c862195880a63cc738a3f7be5_thumb.jpg"),
+            temporary
+                .path()
+                .join("fb53192c862195880a63cc738a3f7be5_thumb.jpg"),
             b"thumbnail",
         )
         .unwrap();
@@ -1172,12 +1235,16 @@ mod timestamp_fallback_tests {
     fn rejects_ambiguous_video_hashes_in_the_same_time_window() {
         let temporary = TempDir::new().unwrap();
         fs::write(
-            temporary.path().join("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_thumb.jpg"),
+            temporary
+                .path()
+                .join("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_thumb.jpg"),
             b"first",
         )
         .unwrap();
         fs::write(
-            temporary.path().join("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb_thumb.jpg"),
+            temporary
+                .path()
+                .join("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb_thumb.jpg"),
             b"second",
         )
         .unwrap();

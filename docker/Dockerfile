@@ -44,7 +44,7 @@ RUN apt-get update && apt-get install -y \
     # Input automation
     xdotool scrot \
     # Accessibility
-    at-spi2-core gir1.2-atspi-2.0 python3 python3-gi python3-pil \
+    at-spi2-core gir1.2-atspi-2.0 python3 python3-gi \
     # Notifications
     dunst libnotify-bin \
     # Fonts
@@ -153,6 +153,10 @@ ENV DISPLAY=:99
 ENV PATH="/opt/tools:$PATH"
 ENV AGENT_DB_PATH=/data/agent.db
 ENV AGENT_PORT=6174
+
+# Kept near the end so image-only updates can reuse the large WeChat runtime layers.
+RUN apt-get update && apt-get install -y python3-pil \
+    && rm -rf /var/lib/apt/lists/*
 
 # ============================================
 # Entrypoint

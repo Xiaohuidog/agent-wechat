@@ -255,6 +255,10 @@ def choose_chat_item(matches):
     return ranked[0]
 
 
+def is_selected_chat_item(node):
+    return "SELECTED" in (node.get("states") or [])
+
+
 def find_search_input(tree):
     for node in walk_a11y(tree):
         if (
@@ -289,7 +293,68 @@ def has_message_list(tree):
     )
 
 
-def select_by_chat_name(chat_name, timeout=12):
+def redraw_wechat_window(pid):
+    """Force the affected WeChat build to repaint its visible chat surface."""
+    build_id = get_build_id(pid)
+    if not build_id or not build_id.startswith("d16278a4"):
+        return True
+
+    for title in ("^Weixin$", "^WeChat$"):
+        found = subprocess.run(
+            [
+                "xdotool",
+                "search",
+                "--onlyvisible",
+                "--pid",
+                str(pid),
+                "--name",
+                title,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        window_ids = [line.strip() for line in found.stdout.splitlines() if line.strip()]
+        if not window_ids:
+            continue
+        window_id = window_ids[0]
+        geometry = subprocess.run(
+            ["xdotool", "getwindowgeometry", "--shell", window_id],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        values = dict(
+            line.split("=", 1)
+            for line in geometry.stdout.splitlines()
+            if "=" in line
+        )
+        try:
+            width = int(values["WIDTH"])
+            height = int(values["HEIGHT"])
+        except (KeyError, ValueError):
+            return False
+        if width <= 1 or height <= 1:
+            return False
+
+        commands = (
+            ["xdotool", "windowactivate", "--sync", window_id],
+            ["xdotool", "windowsize", window_id, str(width - 1), str(height - 1)],
+            ["xdotool", "windowsize", window_id, str(width), str(height)],
+        )
+        for index, command in enumerate(commands):
+            result = subprocess.run(command, capture_output=True, text=True, timeout=5)
+            if result.returncode != 0:
+                return False
+            if index == 1:
+                time.sleep(0.5)
+            elif index == 2:
+                time.sleep(8)
+        return True
+    return False
+
+
+def select_by_chat_name(chat_name, pid=None, timeout=12):
     """Select a chat through the UI without relying on binary offsets."""
     tree = dump_a11y_tree()
     if tree is None:
@@ -325,8 +390,24 @@ def select_by_chat_name(chat_name, timeout=12):
                 ["/opt/tools/key", "Escape"], capture_output=True, text=True, timeout=5
             )
         return False, "CHAT_UI_AMBIGUOUS" if matches else "CHAT_UI_NOT_FOUND"
-    if not click_bounds(selected_item["bounds"], count=1):
-        return False, "CHAT_UI_CLICK_FAILED"
+    if not is_selected_chat_item(selected_item):
+        if not click_bounds(selected_item["bounds"], count=1):
+            return False, "CHAT_UI_CLICK_FAILED"
+        if pid is not None:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                time.sleep(0.4)
+                tree = dump_a11y_tree()
+                refreshed = (
+                    find_chat_items(tree, chat_name) if tree is not None else []
+                )
+                refreshed_item = choose_chat_item(refreshed)
+                if refreshed_item is not None and is_selected_chat_item(refreshed_item):
+                    break
+            else:
+                return False, "CHAT_UI_SELECT_UNCONFIRMED"
+    if pid is not None and not redraw_wechat_window(pid):
+        return False, "CHAT_UI_REDRAW_FAILED"
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         time.sleep(0.4)
@@ -771,7 +852,7 @@ def main():
     # Prefer the accessibility path. It is independent of the WeChat ELF
     # BuildID and therefore survives routine client upgrades.
     if chat_name and positional[0] != "--list":
-        selected, ui_error = select_by_chat_name(chat_name)
+        selected, ui_error = select_by_chat_name(chat_name, pid=pid)
         if selected:
             result_json(True, username=positional[0], chatName=chat_name, method="a11y")
         log(f"[chat-select] UI selection failed: {ui_error}; trying binary profile")

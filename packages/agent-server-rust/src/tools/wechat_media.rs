@@ -1098,7 +1098,7 @@ pub fn get_message_media(
 
 #[cfg(test)]
 mod timestamp_fallback_tests {
-    use super::{find_unique_dat_by_time, image_filename};
+    use super::{find_unique_dat_by_time, find_unique_video_hash_by_time, image_filename};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tempfile::TempDir;
@@ -1151,5 +1151,40 @@ mod timestamp_fallback_tests {
     fn labels_thumbnail_filenames_without_relying_on_dimensions() {
         assert_eq!(image_filename(42, "jpg", true), "msg_42_thumb.jpg");
         assert_eq!(image_filename(42, "jpg", false), "msg_42.jpg");
+    }
+
+    #[test]
+    fn recovers_unique_video_hash_from_thumbnail_timestamp() {
+        let temporary = TempDir::new().unwrap();
+        fs::write(
+            temporary.path().join("fb53192c862195880a63cc738a3f7be5_thumb.jpg"),
+            b"thumbnail",
+        )
+        .unwrap();
+
+        assert_eq!(
+            find_unique_video_hash_by_time(temporary.path(), now_seconds()),
+            Some("fb53192c862195880a63cc738a3f7be5".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_ambiguous_video_hashes_in_the_same_time_window() {
+        let temporary = TempDir::new().unwrap();
+        fs::write(
+            temporary.path().join("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_thumb.jpg"),
+            b"first",
+        )
+        .unwrap();
+        fs::write(
+            temporary.path().join("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb_thumb.jpg"),
+            b"second",
+        )
+        .unwrap();
+
+        assert_eq!(
+            find_unique_video_hash_by_time(temporary.path(), now_seconds()),
+            None
+        );
     }
 }

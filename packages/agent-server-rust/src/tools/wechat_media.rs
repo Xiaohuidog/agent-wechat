@@ -16,6 +16,13 @@ struct ImageKeys {
     xor_byte: Option<u8>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ImageDatVariant {
+    HighResolution,
+    Medium,
+    Thumbnail,
+}
+
 fn unsupported() -> MediaResult {
     MediaResult {
         media_type: "unsupported".into(),
@@ -42,6 +49,38 @@ fn image_filename(local_id: i64, extension: &str, thumbnail: bool) -> String {
     } else {
         format!("msg_{local_id}.{extension}")
     }
+}
+
+fn parse_image_dat_name(name: &str) -> Option<(&str, ImageDatVariant)> {
+    if let Some(stem) = name.strip_suffix("_h.dat") {
+        Some((stem, ImageDatVariant::HighResolution))
+    } else if let Some(stem) = name.strip_suffix("_t.dat") {
+        Some((stem, ImageDatVariant::Thumbnail))
+    } else {
+        name.strip_suffix(".dat")
+            .map(|stem| (stem, ImageDatVariant::Medium))
+    }
+}
+
+fn find_best_image_dat(image_dir: &Path, stem: &str) -> Option<PathBuf> {
+    [
+        format!("{stem}_h.dat"),
+        format!("{stem}.dat"),
+        format!("{stem}_t.dat"),
+    ]
+    .into_iter()
+    .map(|name| image_dir.join(name))
+    .find(|path| path.is_file())
+}
+
+fn image_dat_variant_path(dat_path: &Path, variant: ImageDatVariant) -> Option<PathBuf> {
+    let (stem, _) = parse_image_dat_name(dat_path.file_name()?.to_str()?)?;
+    let suffix = match variant {
+        ImageDatVariant::HighResolution => "_h.dat",
+        ImageDatVariant::Medium => ".dat",
+        ImageDatVariant::Thumbnail => "_t.dat",
+    };
+    Some(dat_path.parent()?.join(format!("{stem}{suffix}")))
 }
 
 fn account_base_paths(account_dir: &str) -> [String; 2] {
@@ -436,7 +475,13 @@ fn find_dat_via_hardlink(
             .join(date_dir)
             .join("Img")
             .join(file_name);
-        if dat_path.exists() {
+        if let (Some(image_dir), Some((stem, _))) =
+            (dat_path.parent(), parse_image_dat_name(file_name))
+        {
+            if let Some(best_path) = find_best_image_dat(image_dir, stem) {
+                return Some(best_path.to_string_lossy().to_string());
+            }
+        } else if dat_path.is_file() {
             return Some(dat_path.to_string_lossy().to_string());
         }
     }
@@ -500,17 +545,13 @@ fn find_dat_via_resource_db(
     let year_month = dt.format("%Y-%m").to_string();
 
     for base in &account_base_paths(account_dir) {
-        // Try mid-res .dat first, then _t.dat thumbnail
-        for suffix in &["", "_t"] {
-            let dat_path = Path::new(base)
-                .join("msg/attach")
-                .join(&chat_hash)
-                .join(&year_month)
-                .join("Img")
-                .join(format!("{file_hash}{suffix}.dat"));
-            if dat_path.exists() {
-                return Some(dat_path.to_string_lossy().to_string());
-            }
+        let image_dir = Path::new(base)
+            .join("msg/attach")
+            .join(&chat_hash)
+            .join(&year_month)
+            .join("Img");
+        if let Some(dat_path) = find_best_image_dat(&image_dir, &file_hash) {
+            return Some(dat_path.to_string_lossy().to_string());
         }
     }
 
@@ -525,16 +566,16 @@ fn find_unique_dat_by_time(image_dir: &Path, create_time: i64) -> Option<PathBuf
     const BEFORE_SECONDS: i64 = 5;
     const AFTER_SECONDS: i64 = 10;
 
-    let mut candidates: HashMap<String, (Option<PathBuf>, Option<PathBuf>)> = HashMap::new();
+    let mut candidates: HashMap<
+        String,
+        (Option<PathBuf>, Option<PathBuf>, Option<PathBuf>),
+    > = HashMap::new();
     for entry in fs::read_dir(image_dir).ok()?.flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
-        let (stem, is_thumbnail) = if let Some(stem) = name.strip_suffix("_t.dat") {
-            (stem, true)
-        } else if let Some(stem) = name.strip_suffix(".dat") {
-            (stem, false)
-        } else {
-            continue;
+        let (stem, variant) = match parse_image_dat_name(&name) {
+            Some(parsed) => parsed,
+            None => continue,
         };
         let modified = entry
             .metadata()
@@ -550,18 +591,18 @@ fn find_unique_dat_by_time(image_dir: &Path, create_time: i64) -> Option<PathBuf
             continue;
         }
         let candidate = candidates.entry(stem.to_string()).or_default();
-        if is_thumbnail {
-            candidate.1 = Some(path);
-        } else {
-            candidate.0 = Some(path);
+        match variant {
+            ImageDatVariant::HighResolution => candidate.0 = Some(path),
+            ImageDatVariant::Medium => candidate.1 = Some(path),
+            ImageDatVariant::Thumbnail => candidate.2 = Some(path),
         }
     }
 
     if candidates.len() != 1 {
         return None;
     }
-    let (full, thumbnail) = candidates.into_values().next()?;
-    full.or(thumbnail)
+    let (high_resolution, medium, thumbnail) = candidates.into_values().next()?;
+    high_resolution.or(medium).or(thumbnail)
 }
 
 fn find_dat_via_timestamp(
@@ -761,10 +802,14 @@ fn decrypt_and_return(
             };
         }
         // Try _t.dat thumbnail
-        let thumb_path = dat_path.replace(".dat", "_t.dat");
-        if Path::new(&thumb_path).exists() {
+        let thumb_path =
+            image_dat_variant_path(Path::new(dat_path), ImageDatVariant::Thumbnail);
+        if let Some(thumb_path) = thumb_path.filter(|path| path.is_file()) {
             if let Ok(thumb_dat) = fs::read(&thumb_path) {
-                if let Some(xb2) = resolve_xor_byte(&thumb_path, &thumb_dat, image_keys) {
+                let thumb_path_string = thumb_path.to_string_lossy();
+                if let Some(xb2) =
+                    resolve_xor_byte(thumb_path_string.as_ref(), &thumb_dat, image_keys)
+                {
                     if let Some(dec) =
                         decrypt_dat(&thumb_dat, &image_keys.aes_key_hex, xb2)
                     {
@@ -1098,8 +1143,12 @@ pub fn get_message_media(
 
 #[cfg(test)]
 mod timestamp_fallback_tests {
-    use super::{find_unique_dat_by_time, image_filename};
+    use super::{
+        find_best_image_dat, find_unique_dat_by_time, image_dat_variant_path, image_filename,
+        ImageDatVariant,
+    };
     use std::fs;
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
     use tempfile::TempDir;
 
@@ -1144,6 +1193,46 @@ mod timestamp_fallback_tests {
         assert_eq!(
             find_unique_dat_by_time(temporary.path(), now_seconds()),
             Some(full)
+        );
+    }
+
+    #[test]
+    fn prefers_high_resolution_over_medium_and_thumbnail() {
+        let temporary = TempDir::new().unwrap();
+        let high_resolution = temporary.path().join("image-a_h.dat");
+        fs::write(temporary.path().join("image-a_t.dat"), b"thumbnail").unwrap();
+        fs::write(temporary.path().join("image-a.dat"), b"medium").unwrap();
+        fs::write(&high_resolution, b"high-resolution").unwrap();
+
+        assert_eq!(
+            find_best_image_dat(temporary.path(), "image-a"),
+            Some(high_resolution.clone())
+        );
+        assert_eq!(
+            find_unique_dat_by_time(temporary.path(), now_seconds()),
+            Some(high_resolution)
+        );
+    }
+
+    #[test]
+    fn keeps_distinct_high_resolution_images_fail_closed() {
+        let temporary = TempDir::new().unwrap();
+        fs::write(temporary.path().join("image-a_h.dat"), b"first").unwrap();
+        fs::write(temporary.path().join("image-b_h.dat"), b"second").unwrap();
+
+        assert_eq!(
+            find_unique_dat_by_time(temporary.path(), now_seconds()),
+            None
+        );
+    }
+
+    #[test]
+    fn derives_thumbnail_sibling_from_high_resolution_path() {
+        let high_resolution = Path::new("/tmp/image-a_h.dat");
+
+        assert_eq!(
+            image_dat_variant_path(high_resolution, ImageDatVariant::Thumbnail),
+            Some(PathBuf::from("/tmp/image-a_t.dat"))
         );
     }
 

@@ -154,6 +154,10 @@ ENV PATH="/opt/tools:$PATH"
 ENV AGENT_DB_PATH=/data/agent.db
 ENV AGENT_PORT=6174
 
+# Kept near the end so image-only updates can reuse the large WeChat runtime layers.
+RUN apt-get update && apt-get install -y python3-pil \
+    && rm -rf /var/lib/apt/lists/*
+
 # ============================================
 # Entrypoint
 # ============================================

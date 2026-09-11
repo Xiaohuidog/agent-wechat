@@ -48,7 +48,10 @@ jobs:
         run: |
           VERSION=$(jq -r '.version' packages/agent-server-rust/package.json)
           TAG="v${VERSION}"
-          TAG_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq '.object.sha' 2>/dev/null || true)
+          TAG_SHA=""
+          if EXISTING_TAG_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq '.object.sha' 2>/dev/null); then
+            TAG_SHA="$EXISTING_TAG_SHA"
+          fi
 
           if [ -z "$TAG_SHA" ] || [ "$TAG_SHA" = "$GITHUB_SHA" ]; then
             echo "released=true" >> "$GITHUB_OUTPUT"

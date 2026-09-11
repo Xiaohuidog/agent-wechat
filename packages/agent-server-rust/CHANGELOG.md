@@ -1,5 +1,13 @@
 # @agent-wechat/agent-server
 
+## 0.12.1
+
+### Patch Changes
+
+- [`b9d8f91`](https://github.com/thisnick/agent-wechat/commit/b9d8f9184174c88b9af23799a23165d1457bfee5) - Recover newly received video media when resource metadata is unavailable, and stabilize accessible chat selection and rendering for WeChat build `d16278a4`.
+
+- [`9321900`](https://github.com/thisnick/agent-wechat/commit/9321900e1daf32af33dd482670aa41a652ca638b) - Add a bounded, idempotent image fetch operation that opens only the latest message after uniquely matching its visible thumbnail.
+
 ## 0.12.0
 
 ## 0.11.15

@@ -68,6 +68,139 @@ class ChatSelectUiFallbackTest(unittest.TestCase):
             )
         )
 
+    def test_accessible_chat_selection_clicks_once(self):
+        bounds = {"x": 261, "y": 226, "width": 240, "height": 65}
+        trees = iter(
+            [
+                {
+                    "role": "list-item",
+                    "name": "群测试\n成员: [Video]",
+                    "bounds": bounds,
+                },
+                {"role": "list", "name": "Messages", "children": []},
+            ]
+        )
+        with (
+            mock.patch.object(chat_select, "dump_a11y_tree", side_effect=trees),
+            mock.patch.object(chat_select, "click_bounds", return_value=True) as click,
+            mock.patch.object(chat_select.time, "sleep"),
+        ):
+            selected, error = chat_select.select_by_chat_name("群测试")
+
+        self.assertTrue(selected)
+        self.assertIsNone(error)
+        click.assert_called_once_with(bounds, count=1)
+
+    def test_selected_affected_build_redraws_without_clicking_again(self):
+        bounds = {"x": 261, "y": 226, "width": 240, "height": 65}
+        events = []
+
+        def redraw(_pid):
+            events.append("redraw")
+            return True
+
+        trees = iter(
+            [
+                {
+                    "role": "list-item",
+                    "name": "群测试\n[Video]",
+                    "bounds": bounds,
+                    "states": ["SELECTED"],
+                },
+                {"role": "list", "name": "Messages", "children": []},
+            ]
+        )
+        with (
+            mock.patch.object(chat_select, "dump_a11y_tree", side_effect=trees),
+            mock.patch.object(chat_select, "click_bounds", return_value=True) as click,
+            mock.patch.object(chat_select, "redraw_wechat_window", side_effect=redraw),
+            mock.patch.object(
+                chat_select.time,
+                "sleep",
+                side_effect=lambda _delay: events.append("poll"),
+            ),
+        ):
+            selected, error = chat_select.select_by_chat_name("群测试", pid="3739")
+
+        self.assertTrue(selected)
+        self.assertIsNone(error)
+        click.assert_not_called()
+        self.assertEqual(events[:2], ["redraw", "poll"])
+
+    def test_unselected_chat_is_confirmed_before_redraw(self):
+        bounds = {"x": 261, "y": 226, "width": 240, "height": 65}
+        selected = {
+            "role": "list-item",
+            "name": "群测试\n[Video]",
+            "bounds": bounds,
+            "states": ["SELECTED"],
+        }
+        trees = iter(
+            [
+                {"role": "list-item", "name": "群测试\n[Video]", "bounds": bounds},
+                selected,
+                {"role": "list", "name": "Messages", "children": []},
+            ]
+        )
+        events = []
+        with (
+            mock.patch.object(chat_select, "dump_a11y_tree", side_effect=trees),
+            mock.patch.object(chat_select, "click_bounds", return_value=True),
+            mock.patch.object(
+                chat_select,
+                "redraw_wechat_window",
+                side_effect=lambda _pid: events.append("redraw") or True,
+            ),
+            mock.patch.object(
+                chat_select.time,
+                "sleep",
+                side_effect=lambda _delay: events.append("poll"),
+            ),
+        ):
+            opened, error = chat_select.select_by_chat_name("群测试", pid="3739")
+
+        self.assertTrue(opened)
+        self.assertIsNone(error)
+        self.assertEqual(events[:2], ["poll", "redraw"])
+
+    def test_affected_build_forces_one_pixel_window_redraw(self):
+        completed = mock.Mock(returncode=0, stdout="")
+        search = mock.Mock(returncode=0, stdout="18874384\n")
+        geometry = mock.Mock(returncode=0, stdout="WIDTH=880\nHEIGHT=640\n")
+        with (
+            mock.patch.object(
+                chat_select, "get_build_id", return_value="d16278a416e00052"
+            ),
+            mock.patch.object(
+                chat_select.subprocess,
+                "run",
+                side_effect=[search, geometry, completed, completed, completed],
+            ) as run,
+            mock.patch.object(chat_select.time, "sleep") as sleep,
+        ):
+            self.assertTrue(chat_select.redraw_wechat_window("3739"))
+
+        self.assertEqual(
+            run.call_args_list[-2].args[0],
+            ["xdotool", "windowsize", "18874384", "879", "639"],
+        )
+        self.assertEqual(
+            run.call_args_list[-1].args[0],
+            ["xdotool", "windowsize", "18874384", "880", "640"],
+        )
+        self.assertEqual(sleep.call_args_list, [mock.call(0.5), mock.call(8)])
+
+    def test_other_build_does_not_touch_window(self):
+        with (
+            mock.patch.object(
+                chat_select, "get_build_id", return_value="f8713825deadbeef"
+            ),
+            mock.patch.object(chat_select.subprocess, "run") as run,
+        ):
+            self.assertTrue(chat_select.redraw_wechat_window("55"))
+
+        run.assert_not_called()
+
     def test_search_prefers_full_group_card_over_suggestion(self):
         suggestion = {
             "bounds": {"x": 273, "y": 184, "width": 320, "height": 34}

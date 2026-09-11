@@ -52,8 +52,12 @@ jobs:
           if EXISTING_TAG_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq '.object.sha' 2>/dev/null); then
             TAG_SHA="$EXISTING_TAG_SHA"
           fi
+          RELEASE_COMPLETE="false"
+          if EXISTING_RELEASE_COMPLETE=$(gh release view "$TAG" --json assets --jq 'any(.assets[]; .name == "release-complete.json")' 2>/dev/null); then
+            RELEASE_COMPLETE="$EXISTING_RELEASE_COMPLETE"
+          fi
 
-          if [ -z "$TAG_SHA" ] || [ "$TAG_SHA" = "$GITHUB_SHA" ]; then
+          if [ -z "$TAG_SHA" ] || [ "$TAG_SHA" = "$GITHUB_SHA" ] || [ "$RELEASE_COMPLETE" != "true" ]; then
             echo "released=true" >> "$GITHUB_OUTPUT"
           else
             echo "released=false" >> "$GITHUB_OUTPUT"
@@ -181,6 +185,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Prepare image name
+        id: image
+        run: echo "name=$(echo "ghcr.io/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
       - name: Extract version
         id: version
         run: |
@@ -193,7 +201,7 @@ jobs:
         with:
           context: docker
           platforms: ${{ matrix.platform }}
-          outputs: type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,scope=${{ matrix.arch }},mode=max
 
@@ -240,7 +248,7 @@ jobs:
 
       - name: Create multi-arch manifest
         run: |
-          IMAGE="ghcr.io/${{ github.repository }}"
+          IMAGE=$(echo "ghcr.io/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
           docker buildx imagetools create \
             -t "${IMAGE}:${{ steps.version.outputs.version }}" \
             -t "${IMAGE}:latest" \
@@ -274,6 +282,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Prepare image name
+        id: image
+        run: echo "name=$(echo "ghcr.io/${GITHUB_REPOSITORY}-wechaty-gateway" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
       - name: Build and push by digest
         id: build
         uses: docker/build-push-action@v6
@@ -281,7 +293,7 @@ jobs:
           context: .
           file: packages/wechaty-gateway/Dockerfile
           platforms: ${{ matrix.platform }}
-          outputs: type=image,name=ghcr.io/${{ github.repository }}-wechaty-gateway,push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=wechaty-gateway-${{ matrix.arch }}
           cache-to: type=gha,scope=wechaty-gateway-${{ matrix.arch }},mode=max
 
@@ -328,8 +340,23 @@ jobs:
 
       - name: Create multi-arch manifest
         run: |
-          IMAGE="ghcr.io/${{ github.repository }}-wechaty-gateway"
+          IMAGE=$(echo "ghcr.io/${GITHUB_REPOSITORY}-wechaty-gateway" | tr '[:upper:]' '[:lower:]')
           docker buildx imagetools create \
             -t "${IMAGE}:${{ steps.version.outputs.version }}" \
             -t "${IMAGE}:latest" \
             $(printf "${IMAGE}@sha256:%s " $(ls /tmp/digests/))
+
+  finalize-release:
+    name: Finalize Release
+    needs: [release, publish-binary, publish-tools, merge-docker-manifest, merge-wechaty-gateway-manifest]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Mark release complete
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION='${{ needs.release.outputs.releaseVersion }}'
+          echo "Release v${VERSION} completed by ${GITHUB_SHA}" > release-complete.json
+          gh release upload "v${VERSION}" release-complete.json --repo "$GITHUB_REPOSITORY" --clobber

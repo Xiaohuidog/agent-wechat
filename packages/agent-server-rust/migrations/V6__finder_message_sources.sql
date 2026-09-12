@@ -1,5 +1,5 @@
 CREATE TABLE IF NOT EXISTS finder_message_sources (
-    session_id TEXT NOT NULL REFERENCES sessions(id),
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     account_dir TEXT NOT NULL,
     chat_id TEXT NOT NULL,
     local_id INTEGER NOT NULL,

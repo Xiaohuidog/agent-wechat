@@ -210,6 +210,7 @@ mod tests {
     #[test]
     fn finder_source_migration_applies_to_full_schema() {
         let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         migrations::runner().run(&mut conn).unwrap();
 
         let table_count: i64 = conn
@@ -220,5 +221,28 @@ mod tests {
             )
             .unwrap();
         assert_eq!(table_count, 1);
+
+        conn.execute(
+            "INSERT INTO sessions (id, name, linux_user, display) VALUES ('session-one', 'one', 'wechat-one', ':101')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO finder_message_sources (
+                session_id, account_dir, chat_id, local_id, server_id,
+                object_id, object_nonce_id, raw_xml
+             ) VALUES ('session-one', 'wxid_one', 'group@chatroom', 1, 2, '3', '4', '<msg/>')",
+            [],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM sessions WHERE id = 'session-one'", [])
+            .unwrap();
+
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM finder_message_sources", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(remaining, 0);
     }
 }

@@ -74,7 +74,11 @@ RUN apt-get update && apt-get install -y \
 # ============================================
 # Python packages
 # ============================================
-RUN pip3 install frida-tools silk-python
+ARG PLAYWRIGHT_VERSION=1.62.0
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
+RUN pip3 install frida-tools silk-python "playwright==${PLAYWRIGHT_VERSION}" \
+    && playwright install --with-deps chromium \
+    && chmod -R a+rX /opt/playwright
 
 # ============================================
 # noVNC (browser-based VNC viewer) + websockify

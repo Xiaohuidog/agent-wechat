@@ -1,12 +1,9 @@
-use reqwest::{header, Client, Url};
-use serde::Serialize;
-use serde_json::Value;
-use std::{path::Path, sync::OnceLock, time::Duration};
+use reqwest::{Client, StatusCode, Url};
+use serde::{Deserialize, Serialize};
+use std::{sync::OnceLock, time::Duration};
 
-const SHORT_LINK_API: &str =
-    "https://channels.weixin.qq.com/cgi-bin/mmfinderassistant-bin/post/get_object_short_link";
-const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
-const MAX_COOKIE_BYTES: usize = 32 * 1024;
+const DEFAULT_BROWSER_BRIDGE: &str = "http://127.0.0.1:9223";
+const MAX_RESPONSE_BYTES: u64 = 64 * 1024;
 
 static CLIENT: OnceLock<Client> = OnceLock::new();
 
@@ -38,9 +35,21 @@ impl FinderShortLinkError {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ShortLinkRequest<'a> {
-    export_id: &'a str,
-    nonce_id: &'a str,
+    object_id: &'a str,
+    object_nonce_id: &'a str,
     scene: u8,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShortLinkResponse {
+    short_url: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct FinderBrowserStatus {
+    pub status: String,
 }
 
 fn valid_object_id(value: &str) -> bool {
@@ -57,52 +66,34 @@ fn valid_nonce_id(value: &str) -> bool {
         })
 }
 
-fn valid_cookie(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= MAX_COOKIE_BYTES
-        && value.bytes().all(|byte| !byte.is_ascii_control())
-        && value.split(';').all(|part| {
-            let Some((name, cookie_value)) = part.trim().split_once('=') else {
-                return false;
-            };
-            !name.is_empty()
-                && !cookie_value.is_empty()
-                && name
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-        })
-}
-
-fn read_secret_file(name: &str) -> Option<String> {
-    let path = std::env::var(name).ok()?;
-    std::fs::read_to_string(Path::new(&path)).ok()
-}
-
-fn cookie_header() -> Result<String, FinderShortLinkError> {
-    let value = read_secret_file("FINDER_COOKIE_FILE")
-        .or_else(|| std::env::var("FINDER_COOKIE").ok())
-        .or_else(|| {
-            read_secret_file("FINDER_SESSION_INFO_FILE")
-                .or_else(|| std::env::var("FINDER_SESSION_INFO").ok())
-                .map(|value| format!("sessionInfo={}", value.trim()))
-        })
-        .map(|value| value.trim().to_string())
-        .filter(|value| valid_cookie(value))
-        .ok_or(FinderShortLinkError::SessionUnavailable)?;
-    Ok(value)
-}
-
 fn client() -> Result<&'static Client, FinderShortLinkError> {
     if let Some(client) = CLIENT.get() {
         return Ok(client);
     }
     let created = Client::builder()
-        .timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(20))
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|_| FinderShortLinkError::RequestFailed)?;
     let _ = CLIENT.set(created);
     CLIENT.get().ok_or(FinderShortLinkError::RequestFailed)
+}
+
+fn bridge_url(path: &str) -> Result<Url, FinderShortLinkError> {
+    let base =
+        std::env::var("FINDER_BROWSER_URL").unwrap_or_else(|_| DEFAULT_BROWSER_BRIDGE.to_string());
+    let parsed = Url::parse(&base).map_err(|_| FinderShortLinkError::RequestFailed)?;
+    if parsed.scheme() != "http"
+        || parsed.host_str() != Some("127.0.0.1")
+        || parsed.port().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return Err(FinderShortLinkError::RequestFailed);
+    }
+    parsed
+        .join(path)
+        .map_err(|_| FinderShortLinkError::RequestFailed)
 }
 
 fn trusted_link(value: &str) -> Option<String> {
@@ -125,30 +116,30 @@ fn trusted_link(value: &str) -> Option<String> {
     trusted.then(|| value.trim().to_string())
 }
 
-fn parse_response(payload: &Value) -> Result<String, FinderShortLinkError> {
-    let error_code = payload
-        .get("errCode")
-        .or_else(|| payload.get("errcode"))
-        .and_then(Value::as_i64)
-        .ok_or(FinderShortLinkError::ResponseInvalid)?;
-    if error_code != 0 {
-        return Err(FinderShortLinkError::RemoteRejected);
+fn map_bridge_error(status: StatusCode, code: Option<&str>) -> FinderShortLinkError {
+    match code {
+        Some("FINDER_BROWSER_LOGIN_REQUIRED") => FinderShortLinkError::SessionUnavailable,
+        Some("FINDER_SHORT_LINK_REMOTE_REJECTED") => FinderShortLinkError::RemoteRejected,
+        Some("FINDER_SHORT_LINK_MISSING") => FinderShortLinkError::LinkMissing,
+        _ if status == StatusCode::SERVICE_UNAVAILABLE => FinderShortLinkError::SessionUnavailable,
+        _ => FinderShortLinkError::RequestFailed,
     }
-    let data = payload.get("data").and_then(Value::as_object);
-    for name in ["shortUrl", "short_url", "url"] {
-        if let Some(link) = payload
-            .get(name)
-            .and_then(Value::as_str)
-            .or_else(|| {
-                data.and_then(|value| value.get(name))
-                    .and_then(Value::as_str)
-            })
-            .and_then(trusted_link)
-        {
-            return Ok(link);
-        }
+}
+
+async fn limited_json<T: for<'de> Deserialize<'de>>(
+    response: reqwest::Response,
+) -> Result<T, FinderShortLinkError> {
+    if response.content_length().unwrap_or(0) > MAX_RESPONSE_BYTES {
+        return Err(FinderShortLinkError::ResponseInvalid);
     }
-    Err(FinderShortLinkError::LinkMissing)
+    let body = response
+        .bytes()
+        .await
+        .map_err(|_| FinderShortLinkError::RequestFailed)?;
+    if body.len() as u64 > MAX_RESPONSE_BYTES {
+        return Err(FinderShortLinkError::ResponseInvalid);
+    }
+    serde_json::from_slice(&body).map_err(|_| FinderShortLinkError::ResponseInvalid)
 }
 
 pub async fn resolve_short_link(
@@ -161,51 +152,59 @@ pub async fn resolve_short_link(
     if !valid_nonce_id(nonce_id) {
         return Err(FinderShortLinkError::InvalidNonceId);
     }
-    let cookie = header::HeaderValue::from_str(&cookie_header()?)
-        .map_err(|_| FinderShortLinkError::SessionUnavailable)?;
     let response = client()?
-        .post(SHORT_LINK_API)
-        .header(header::ACCEPT, "application/json, text/plain, */*")
-        .header(header::CONTENT_TYPE, "application/json;charset=UTF-8")
-        .header(header::COOKIE, cookie)
-        .header(header::ORIGIN, "https://channels.weixin.qq.com")
-        .header(
-            header::REFERER,
-            "https://channels.weixin.qq.com/platform/post/list?",
-        )
-        .header("x-requested-with", "XMLHttpRequest")
+        .post(bridge_url("/resolve")?)
         .json(&ShortLinkRequest {
-            export_id: object_id,
-            nonce_id,
+            object_id,
+            object_nonce_id: nonce_id,
             scene: 40,
         })
         .send()
         .await
-        .map_err(|_| FinderShortLinkError::RequestFailed)?;
-    if !response.status().is_success()
-        || response.content_length().unwrap_or(0) > MAX_RESPONSE_BYTES
-    {
-        return Err(FinderShortLinkError::RequestFailed);
+        .map_err(|_| FinderShortLinkError::SessionUnavailable)?;
+    let status = response.status();
+    let payload: ShortLinkResponse = limited_json(response).await?;
+    if !status.is_success() {
+        return Err(map_bridge_error(status, payload.error.as_deref()));
     }
-    let body = response
-        .bytes()
+    payload
+        .short_url
+        .as_deref()
+        .and_then(trusted_link)
+        .ok_or(FinderShortLinkError::LinkMissing)
+}
+
+pub async fn browser_status() -> Result<FinderBrowserStatus, FinderShortLinkError> {
+    let response = client()?
+        .get(bridge_url("/status")?)
+        .send()
         .await
-        .map_err(|_| FinderShortLinkError::RequestFailed)?;
-    if body.len() as u64 > MAX_RESPONSE_BYTES {
-        return Err(FinderShortLinkError::ResponseInvalid);
+        .map_err(|_| FinderShortLinkError::SessionUnavailable)?;
+    if !response.status().is_success() {
+        return Err(FinderShortLinkError::SessionUnavailable);
     }
-    let payload: Value =
-        serde_json::from_slice(&body).map_err(|_| FinderShortLinkError::ResponseInvalid)?;
-    parse_response(&payload)
+    limited_json(response).await
+}
+
+pub async fn show_browser() -> Result<FinderBrowserStatus, FinderShortLinkError> {
+    let response = client()?
+        .post(bridge_url("/show")?)
+        .send()
+        .await
+        .map_err(|_| FinderShortLinkError::SessionUnavailable)?;
+    if !response.status().is_success() {
+        return Err(FinderShortLinkError::SessionUnavailable);
+    }
+    limited_json(response).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_response, trusted_link, valid_cookie, valid_nonce_id, valid_object_id,
+        bridge_url, map_bridge_error, trusted_link, valid_nonce_id, valid_object_id,
         FinderShortLinkError,
     };
-    use serde_json::json;
+    use reqwest::StatusCode;
 
     #[test]
     fn validates_exact_finder_identity() {
@@ -218,11 +217,18 @@ mod tests {
     }
 
     #[test]
-    fn accepts_cookie_headers_without_control_characters() {
-        assert!(valid_cookie("sessionInfo=abc123; token=def-456"));
-        assert!(!valid_cookie("sessionInfo="));
-        assert!(!valid_cookie("sessionInfo=abc\r\nInjected=yes"));
-        assert!(!valid_cookie("invalid"));
+    fn bridge_is_loopback_only() {
+        std::env::remove_var("FINDER_BROWSER_URL");
+        assert_eq!(
+            bridge_url("/status").unwrap().as_str(),
+            "http://127.0.0.1:9223/status"
+        );
+        std::env::set_var("FINDER_BROWSER_URL", "https://example.com");
+        assert_eq!(
+            bridge_url("/status"),
+            Err(FinderShortLinkError::RequestFailed)
+        );
+        std::env::remove_var("FINDER_BROWSER_URL");
     }
 
     #[test]
@@ -239,17 +245,20 @@ mod tests {
     }
 
     #[test]
-    fn parses_success_without_exposing_remote_messages() {
+    fn maps_remote_errors_without_exposing_details() {
         assert_eq!(
-            parse_response(&json!({
-                "errCode": 0,
-                "data": {"shortUrl": "https://weixin.qq.com/sph/AbCdEf1234"}
-            })),
-            Ok("https://weixin.qq.com/sph/AbCdEf1234".to_string())
+            map_bridge_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                Some("FINDER_BROWSER_LOGIN_REQUIRED")
+            ),
+            FinderShortLinkError::SessionUnavailable
         );
         assert_eq!(
-            parse_response(&json!({"errCode": 300330, "errMsg": "private"})),
-            Err(FinderShortLinkError::RemoteRejected)
+            map_bridge_error(
+                StatusCode::BAD_GATEWAY,
+                Some("FINDER_SHORT_LINK_REMOTE_REJECTED")
+            ),
+            FinderShortLinkError::RemoteRejected
         );
     }
 }

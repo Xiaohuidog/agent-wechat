@@ -55,6 +55,8 @@ pub fn build_router() -> Router {
         )
         .route("/api/messages/send", post(messages::send_message))
         .route("/api/finder/short-link", post(finder::short_link))
+        .route("/api/finder/session", get(finder::session_status))
+        .route("/api/finder/session/show", post(finder::show_session))
         // Reliable file downloads
         .route("/api/file-downloads", post(file_downloads::create))
         .route("/api/file-downloads/{id}", get(file_downloads::get))

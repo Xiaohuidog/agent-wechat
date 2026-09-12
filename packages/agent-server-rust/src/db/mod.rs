@@ -206,4 +206,19 @@ mod tests {
         let result = open_encrypted(path_str, "key_b");
         assert!(result.is_err(), "Wrong key should fail");
     }
+
+    #[test]
+    fn finder_source_migration_applies_to_full_schema() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrations::runner().run(&mut conn).unwrap();
+
+        let table_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'finder_message_sources'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_count, 1);
+    }
 }

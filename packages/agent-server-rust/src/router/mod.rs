@@ -3,6 +3,7 @@ mod chats;
 mod contacts;
 mod debug;
 mod events;
+mod finder;
 mod file_downloads;
 mod image_downloads;
 mod messages;
@@ -53,6 +54,7 @@ pub fn build_router() -> Router {
             get(messages::get_media),
         )
         .route("/api/messages/send", post(messages::send_message))
+        .route("/api/finder/short-link", post(finder::short_link))
         // Reliable file downloads
         .route("/api/file-downloads", post(file_downloads::create))
         .route("/api/file-downloads/{id}", get(file_downloads::get))

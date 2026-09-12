@@ -1,5 +1,5 @@
 use super::wechat_db::{get_db_path, query_wechat_db};
-use crate::ia::types::{Message, ReplyInfo};
+use crate::ia::types::{FinderInfo, Message, ReplyInfo};
 use md5::{Digest, Md5};
 use std::collections::HashMap;
 
@@ -104,6 +104,44 @@ fn clean_content(content: &str, msg_type: i32) -> String {
         }
         _ => content.to_string(),
     }
+}
+
+/// Extract the stable identifiers carried by a Finder share message.
+///
+/// Keep the existing display-oriented `content` unchanged and expose only the
+/// two fields downstream consumers need instead of returning the full XML.
+fn extract_finder_info(content: &str, msg_type: i32) -> Option<FinderInfo> {
+    if (msg_type & 0x7FFFFFFF) != 49 {
+        return None;
+    }
+    if extract_xml_tag(content, "type").as_deref() != Some("51") {
+        return None;
+    }
+
+    let start = content.find("<finderFeed>")? + "<finderFeed>".len();
+    let end = content[start..].find("</finderFeed>")? + start;
+    let finder_feed = &content[start..end];
+
+    let object_id = extract_xml_tag(finder_feed, "objectId")?;
+    let object_nonce_id = extract_xml_tag(finder_feed, "objectNonceId")?;
+    if !valid_finder_identifier(&object_id, 256)
+        || !valid_finder_identifier(&object_nonce_id, 512)
+    {
+        return None;
+    }
+
+    Some(FinderInfo {
+        object_id,
+        object_nonce_id,
+    })
+}
+
+fn valid_finder_identifier(value: &str, max_len: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_len
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || "._~+/=-".contains(character)
+        })
 }
 
 /// Extract reply info from type 49 (appmsg) messages with <refermsg>.
@@ -328,6 +366,9 @@ pub fn list_messages(
             // Extract reply info before cleaning (needs raw XML)
             let reply = extract_reply_info(&body, msg_type);
 
+            // Finder identifiers are present in the original app-message XML.
+            let finder = extract_finder_info(&body, msg_type);
+
             // Clean content for display (replace XML with summaries)
             let content = clean_content(&body, msg_type);
 
@@ -395,7 +436,36 @@ pub fn list_messages(
                 is_mentioned,
                 is_self,
                 reply,
+                finder,
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clean_content, extract_finder_info};
+
+    #[test]
+    fn extracts_finder_identifiers_without_changing_legacy_content() {
+        let xml = r#"<msg><appmsg><title><![CDATA[当前微信版本不支持展示该内容，请升级至最新版本。]]></title><type>51</type><finderFeed><objectId><![CDATA[12345678901234567890]]></objectId><objectNonceId><![CDATA[AbCdEf_0123-xyz.~]]></objectNonceId><mediaList><media><objectId><![CDATA[]]></objectId><objectNonceId><![CDATA[]]></objectNonceId></media></mediaList></finderFeed></appmsg></msg>"#;
+
+        assert_eq!(
+            clean_content(xml, 49),
+            "当前微信版本不支持展示该内容，请升级至最新版本。"
+        );
+
+        let finder = extract_finder_info(xml, 49).expect("finder metadata");
+        assert_eq!(finder.object_id, "12345678901234567890");
+        assert_eq!(finder.object_nonce_id, "AbCdEf_0123-xyz.~");
+    }
+
+    #[test]
+    fn rejects_non_finder_and_invalid_finder_identifiers() {
+        let link = r#"<msg><appmsg><type>5</type><finderFeed><objectId>123</objectId><objectNonceId>abc</objectNonceId></finderFeed></appmsg></msg>"#;
+        assert!(extract_finder_info(link, 49).is_none());
+
+        let invalid = r#"<msg><appmsg><type>51</type><finderFeed><objectId>123</objectId><objectNonceId>abc def</objectNonceId></finderFeed></appmsg></msg>"#;
+        assert!(extract_finder_info(invalid, 49).is_none());
+    }
 }

@@ -1,5 +1,11 @@
 # @agent-wechat/agent-server
 
+## 0.12.2
+
+### Patch Changes
+
+- [`ef959c8`](https://github.com/thisnick/agent-wechat/commit/ef959c8319f20f0f2610aac8e4067582730051a7) Thanks [@Xiaohuidog](https://github.com/Xiaohuidog)! - Expose Finder share identifiers as optional structured message metadata while preserving the existing display content.
+
 ## 0.12.1
 
 ### Patch Changes

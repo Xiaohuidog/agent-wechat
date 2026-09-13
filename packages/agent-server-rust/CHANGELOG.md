@@ -1,5 +1,11 @@
 # @agent-wechat/agent-server
 
+## 0.13.2
+
+### Patch Changes
+
+- [`4f839d5`](https://github.com/thisnick/agent-wechat/commit/4f839d5c44786f4a3166408e21117465ffe52f28) Thanks [@Xiaohuidog](https://github.com/Xiaohuidog)! - Retry image operations that failed under the previously broken UI download runtime.
+
 ## 0.13.1
 
 ### Patch Changes

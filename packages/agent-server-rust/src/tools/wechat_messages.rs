@@ -271,6 +271,33 @@ pub fn find_message_db<'a>(
     None
 }
 
+/// Return the newest image message in a chat, ignoring newer messages of
+/// other types. The image download UI separately requires the target
+/// thumbnail to match the newest visible image row uniquely.
+pub fn latest_image_local_id(
+    account_dir: &str,
+    keys: &HashMap<String, String>,
+    chat_id: &str,
+) -> Option<i64> {
+    let table_name = get_msg_table_name(chat_id);
+    let (db_name, key) = find_message_db(account_dir, keys, chat_id)?;
+    let db_path = get_db_path(account_dir, &db_name);
+    query_wechat_db(
+        &db_path,
+        key,
+        &format!(
+            "SELECT local_id
+             FROM \"{table_name}\"
+             WHERE (local_type & 4294967295) = 3
+             ORDER BY create_time DESC, local_id DESC
+             LIMIT 1;"
+        ),
+    )
+    .first()?
+    .get("local_id")?
+    .as_i64()
+}
+
 /// List messages for a specific chat.
 ///
 /// Messages may be spread across message_0.db, message_1.db, etc.

@@ -13,6 +13,7 @@ use crate::sessions::manager::get_session;
 use crate::tools::exec::{exec_command, ExecOptions};
 use crate::tools::wechat_chats;
 use crate::tools::wechat_keys::get_stored_keys;
+use crate::tools::wechat_messages::latest_image_local_id;
 use crate::tools::wechat_media::get_image_download_cache_target;
 
 const ACTIVE_TIMEOUT: &str = "-10 minutes";
@@ -58,6 +59,10 @@ fn validate(input: &CreateRequest) -> Result<(), &'static str> {
 
 fn same_identity(input: &CreateRequest, operation: &Operation) -> bool {
     input.chat_id == operation.chat_id && input.local_id == operation.local_id
+}
+
+fn is_latest_image(local_id: i64, latest_image_local_id: Option<i64>) -> bool {
+    latest_image_local_id == Some(local_id)
 }
 
 fn load_operation(id: &str) -> Option<Operation> {
@@ -169,8 +174,11 @@ async fn run(id: String) {
         update_state(&id, "failed", Some("IMAGE_CHAT_NOT_FOUND"));
         return;
     };
-    if chat.last_msg_local_id != Some(operation.local_id) {
-        update_state(&id, "failed", Some("IMAGE_NOT_LATEST_MESSAGE"));
+    if !is_latest_image(
+        operation.local_id,
+        latest_image_local_id(&account_dir, &keys, &operation.chat_id),
+    ) {
+        update_state(&id, "failed", Some("IMAGE_NOT_LATEST_IMAGE"));
         return;
     }
     let Some(target) = get_image_download_cache_target(
@@ -270,10 +278,25 @@ pub async fn create(Json(input): Json<CreateRequest>) -> Response {
                  state=CASE
                      WHEN image_download_operations.state='ready' THEN 'ready'
                      WHEN image_download_operations.state='failed'
+                          AND image_download_operations.error_code='IMAGE_NOT_LATEST_MESSAGE'
+                         THEN 'queued'
+                     WHEN image_download_operations.state='failed'
                           AND image_download_operations.attempts < ?5 THEN 'queued'
                      WHEN image_download_operations.updated_at <= datetime('now', '-10 minutes')
                           AND image_download_operations.attempts < ?5 THEN 'queued'
                      ELSE image_download_operations.state
+                 END,
+                 attempts=CASE
+                     WHEN image_download_operations.state='failed'
+                          AND image_download_operations.error_code='IMAGE_NOT_LATEST_MESSAGE'
+                         THEN 0
+                     ELSE image_download_operations.attempts
+                 END,
+                 error_code=CASE
+                     WHEN image_download_operations.state='failed'
+                          AND image_download_operations.error_code='IMAGE_NOT_LATEST_MESSAGE'
+                         THEN NULL
+                     ELSE image_download_operations.error_code
                  END,
                  updated_at=datetime('now')",
             rusqlite::params![id, input.idempotency_key, input.chat_id, input.local_id, MAX_ATTEMPTS],
@@ -327,5 +350,16 @@ mod tests {
         let mut invalid = request();
         invalid.chat_id = "bad\nchat".into();
         assert_eq!(validate(&invalid), Err("IMAGE_DOWNLOAD_MESSAGE_ID_INVALID"));
+    }
+
+    #[test]
+    fn allows_latest_image_when_a_newer_non_image_message_exists() {
+        assert!(is_latest_image(42, Some(42)));
+    }
+
+    #[test]
+    fn rejects_an_older_image() {
+        assert!(!is_latest_image(41, Some(42)));
+        assert!(!is_latest_image(41, None));
     }
 }

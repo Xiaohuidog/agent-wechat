@@ -13,11 +13,12 @@ use crate::sessions::manager::get_session;
 use crate::tools::exec::{exec_command, ExecOptions};
 use crate::tools::wechat_chats;
 use crate::tools::wechat_keys::get_stored_keys;
-use crate::tools::wechat_messages::latest_image_local_id;
 use crate::tools::wechat_media::get_image_download_cache_target;
+use crate::tools::wechat_messages::latest_image_local_id;
 
 const ACTIVE_TIMEOUT: &str = "-10 minutes";
 const MAX_ATTEMPTS: i64 = 2;
+const RESETTABLE_ERRORS: [&str; 2] = ["IMAGE_NOT_LATEST_MESSAGE", "IMAGE_DOWNLOAD_UI_FAILED"];
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -63,6 +64,11 @@ fn same_identity(input: &CreateRequest, operation: &Operation) -> bool {
 
 fn is_latest_image(local_id: i64, latest_image_local_id: Option<i64>) -> bool {
     latest_image_local_id == Some(local_id)
+}
+
+#[cfg(test)]
+fn is_resettable_error(error_code: &str) -> bool {
+    RESETTABLE_ERRORS.contains(&error_code)
 }
 
 fn load_operation(id: &str) -> Option<Operation> {
@@ -278,7 +284,7 @@ pub async fn create(Json(input): Json<CreateRequest>) -> Response {
                  state=CASE
                      WHEN image_download_operations.state='ready' THEN 'ready'
                      WHEN image_download_operations.state='failed'
-                          AND image_download_operations.error_code='IMAGE_NOT_LATEST_MESSAGE'
+                          AND image_download_operations.error_code IN (?6, ?7)
                          THEN 'queued'
                      WHEN image_download_operations.state='failed'
                           AND image_download_operations.attempts < ?5 THEN 'queued'
@@ -288,18 +294,26 @@ pub async fn create(Json(input): Json<CreateRequest>) -> Response {
                  END,
                  attempts=CASE
                      WHEN image_download_operations.state='failed'
-                          AND image_download_operations.error_code='IMAGE_NOT_LATEST_MESSAGE'
+                          AND image_download_operations.error_code IN (?6, ?7)
                          THEN 0
                      ELSE image_download_operations.attempts
                  END,
                  error_code=CASE
                      WHEN image_download_operations.state='failed'
-                          AND image_download_operations.error_code='IMAGE_NOT_LATEST_MESSAGE'
+                          AND image_download_operations.error_code IN (?6, ?7)
                          THEN NULL
                      ELSE image_download_operations.error_code
                  END,
                  updated_at=datetime('now')",
-            rusqlite::params![id, input.idempotency_key, input.chat_id, input.local_id, MAX_ATTEMPTS],
+            rusqlite::params![
+                id,
+                input.idempotency_key,
+                input.chat_id,
+                input.local_id,
+                MAX_ATTEMPTS,
+                RESETTABLE_ERRORS[0],
+                RESETTABLE_ERRORS[1]
+            ],
         ) {
             tracing::error!("image download insert failed: {error}");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
@@ -361,5 +375,12 @@ mod tests {
     fn rejects_an_older_image() {
         assert!(!is_latest_image(41, Some(42)));
         assert!(!is_latest_image(41, None));
+    }
+
+    #[test]
+    fn resets_operations_failed_by_fixed_runtime_errors() {
+        assert!(is_resettable_error("IMAGE_NOT_LATEST_MESSAGE"));
+        assert!(is_resettable_error("IMAGE_DOWNLOAD_UI_FAILED"));
+        assert!(!is_resettable_error("IMAGE_CARD_NOT_FOUND"));
     }
 }

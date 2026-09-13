@@ -1,5 +1,15 @@
 # @agent-wechat/agent-server
 
+## 0.13.0
+
+### Minor Changes
+
+- [`05e67be`](https://github.com/thisnick/agent-wechat/commit/05e67be549db21bf93fb457fd0a78c9aa773257e) Thanks [@Xiaohuidog](https://github.com/Xiaohuidog)! - Preserve Finder message source XML before display-oriented content cleanup and add a fail-closed probe for WeChat's built-in structured runtime endpoint.
+
+### Patch Changes
+
+- [`a9f692c`](https://github.com/thisnick/agent-wechat/commit/a9f692ce524a09debf8028a17b9e63a64d64de26) - Allow the newest image in a chat to be fetched after newer non-image messages arrive, while retaining exact thumbnail identity checks.
+
 ## 0.12.2
 
 ### Patch Changes

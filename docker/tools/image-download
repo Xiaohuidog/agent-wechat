@@ -12,6 +12,8 @@ import time
 
 from PIL import Image
 
+RESAMPLE_BILINEAR = getattr(getattr(Image, "Resampling", Image), "BILINEAR")
+
 
 class DownloadError(Exception):
     pass
@@ -83,8 +85,8 @@ def image_rows(value, geometry):
 
 
 def _normalized_difference(left, right):
-    left = left.convert("RGB").resize((20, 20), Image.Resampling.BILINEAR)
-    right = right.convert("RGB").resize((20, 20), Image.Resampling.BILINEAR)
+    left = left.convert("RGB").resize((20, 20), RESAMPLE_BILINEAR)
+    right = right.convert("RGB").resize((20, 20), RESAMPLE_BILINEAR)
     total = 0
     for a, b in zip(left.getdata(), right.getdata()):
         total += sum(abs(a[channel] - b[channel]) for channel in range(3))
@@ -174,6 +176,7 @@ def weixin_geometry():
 def capture():
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as output:
         path = output.name
+    os.unlink(path)
     try:
         command("scrot", path, timeout=10)
         with Image.open(path) as image:

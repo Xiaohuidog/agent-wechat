@@ -1,5 +1,11 @@
 # @agent-wechat/agent-server
 
+## 0.13.1
+
+### Patch Changes
+
+- [`10ed1bf`](https://github.com/thisnick/agent-wechat/commit/10ed1bf098edb185da0eacfc02cd55e438e90ec0) Thanks [@Xiaohuidog](https://github.com/Xiaohuidog)! - Fix image download screenshots on existing-file-safe scrot builds and older Pillow releases.
+
 ## 0.13.0
 
 ### Minor Changes

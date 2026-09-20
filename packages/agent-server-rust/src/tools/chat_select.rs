@@ -21,8 +21,14 @@ pub async fn open_chat(
     chat_id: &str,
     force: bool,
     click_xy: Option<(f64, f64)>,
+    chat_name: Option<&str>,
 ) -> OpenChatResult {
     let mut args: Vec<String> = Vec::new();
+
+    if let Some(name) = chat_name {
+        args.push("--chat-name".into());
+        args.push(name.into());
+    }
 
     if force {
         args.push("--force".into());

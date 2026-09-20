@@ -21,6 +21,8 @@ import json
 import os
 import re
 import shutil
+import urllib.error
+import urllib.request
 
 # ── Per-build constants ──────────────────────────────────────────────────────
 # Keyed by first 8 hex chars of ELF BuildID (same pattern as extract-keys.py).
@@ -148,6 +150,29 @@ def get_profile(pid):
         return None, f"Unknown BuildID prefix: {prefix}. Known: {list(BUILD_PROFILES.keys())}"
     log(f"[chat-select] Profile: SELECT_SESSION=0x{profile['SELECT_SESSION']:x} USERNAME_OFF=0x{profile['USERNAME_OFF']:x}")
     return profile, None
+
+
+def resolve_chat_name_from_api(username):
+    """Resolve a chat username through the local agent API."""
+    try:
+        with open("/data/auth-token", encoding="utf-8") as token_file:
+            token = token_file.read().strip()
+        request = urllib.request.Request(
+            "http://127.0.0.1:6174/api/chats?limit=500&offset=0",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            chats = json.loads(response.read().decode("utf-8"))
+        for chat in chats:
+            if isinstance(chat, dict) and (
+                chat.get("id") == username or chat.get("username") == username
+            ):
+                name = chat.get("name")
+                if isinstance(name, str) and name.strip():
+                    return name.strip()
+    except (OSError, ValueError, TypeError, urllib.error.URLError) as error:
+        log(f"[chat-select] API chat-name lookup failed: {error}")
+    return None
 
 
 def find_chat_item_from_a11y():
@@ -289,13 +314,44 @@ def has_message_list(tree):
     )
 
 
+def opened_chat_matches(tree, chat_name):
+    """Confirm the right-hand chat header, not merely a stale message list."""
+    expected = chat_name.strip()
+    if not expected:
+        return False
+    for node in walk_a11y(tree):
+        if node.get("role") != "frame" or not isinstance(node.get("name"), str):
+            continue
+        actual = node["name"].strip()
+        if actual == expected or actual.startswith(f"{expected}("):
+            return True
+    return False
+
+
+def selected_chat_matches(tree, chat_name):
+    """Confirm the target row is selected in WeChat's chat list.
+
+    WeChat 4.1 exposes the selected row through AT-SPI, but does not expose
+    the right-hand chat header as a named frame.  The selected row is the
+    stable, version-independent confirmation for this client.
+    """
+    for node in find_chat_items(tree, chat_name):
+        states = node.get("states") or []
+        if "SELECTED" in states:
+            return True
+    return False
+
+
 def select_by_chat_name(chat_name, timeout=12):
     """Select a chat through the UI without relying on binary offsets."""
     tree = dump_a11y_tree()
     if tree is None:
         return False, "CHAT_UI_UNAVAILABLE"
 
-    matches = find_chat_items(tree, chat_name)
+    # Prefer the built-in search box when available. The chat list can be
+    # visually reordered while WeChat is still loading; coordinates from that
+    # transient list may otherwise open the wrong row or no row at all.
+    matches = [] if find_search_input(tree) is not None else find_chat_items(tree, chat_name)
     used_search = False
     if not matches:
         search = find_search_input(tree)
@@ -325,13 +381,19 @@ def select_by_chat_name(chat_name, timeout=12):
                 ["/opt/tools/key", "Escape"], capture_output=True, text=True, timeout=5
             )
         return False, "CHAT_UI_AMBIGUOUS" if matches else "CHAT_UI_NOT_FOUND"
-    if not click_bounds(selected_item["bounds"], count=2):
+    # WeChat Linux may treat the second click of a synthetic double-click as
+    # a second selection while the first click is still loading the chat.
+    # A single click is sufficient and avoids reopening the stale chat pane.
+    if not click_bounds(selected_item["bounds"], count=1):
         return False, "CHAT_UI_CLICK_FAILED"
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         time.sleep(0.4)
         tree = dump_a11y_tree()
-        if tree is not None and has_message_list(tree):
+        if tree is not None and has_message_list(tree) and (
+            opened_chat_matches(tree, chat_name)
+            or selected_chat_matches(tree, chat_name)
+        ):
             break
     else:
         return False, "CHAT_UI_OPEN_UNCONFIRMED"
@@ -767,6 +829,7 @@ def main():
     if not pid:
         result_json(False, error="WeChat is not running")
     log(f"[chat-select] WeChat PID={pid}")
+    target = positional[0]
 
     # Prefer the accessibility path. It is independent of the WeChat ELF
     # BuildID and therefore survives routine client upgrades.
@@ -778,6 +841,18 @@ def main():
 
     profile, err = get_profile(pid)
     if not profile:
+        if target != "--list":
+            resolved_name = resolve_chat_name_from_api(target)
+            if resolved_name:
+                selected, ui_error = select_by_chat_name(resolved_name)
+                if selected:
+                    result_json(
+                        True,
+                        username=target,
+                        chatName=resolved_name,
+                        method="a11y-api",
+                    )
+                result_json(False, error=ui_error or "Chat UI selection failed")
         result_json(False, error=err, errorCode=ui_error if chat_name else "CHAT_BUILD_UNSUPPORTED")
 
     # Enumerate sessions
@@ -790,7 +865,6 @@ def main():
     if positional[0] == "--list":
         result_json(True, sessions=sessions)
 
-    target = positional[0]
     if is_official_account(target):
         result_json(False, error=f"'{target}' is an official account and cannot be opened")
     if target not in sessions:

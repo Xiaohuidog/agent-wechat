@@ -112,7 +112,7 @@ impl Plan for ChatOpenPlan {
                     });
 
                     let force = main_state_id == Some("chat");
-                    let result = open_chat(&params.chat_id, force, click_xy).await;
+                    let result = open_chat(&params.chat_id, force, click_xy, None).await;
 
                     if !result.ok {
                         plan_state.result = Some(result);

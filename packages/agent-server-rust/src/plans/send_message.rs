@@ -9,10 +9,47 @@ pub struct SendMessagePlan;
 
 pub struct SendMessageParams {
     pub chat_id: String,
+    pub chat_name: Option<String>,
     pub message: Option<String>,
     pub image_path: Option<String>,
     pub image_mime: Option<String>,
     pub file_path: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{confirmation_can_finish, opened_chat_matches, A11yNode};
+
+    #[test]
+    fn sent_message_is_confirmed_even_when_editor_controls_are_temporarily_missing() {
+        assert!(confirmation_can_finish(true, false, false));
+        assert!(!confirmation_can_finish(false, true, false));
+    }
+
+    #[test]
+    fn image_send_is_confirmed_by_disabled_send_button() {
+        assert!(confirmation_can_finish(false, true, true));
+    }
+
+    #[test]
+    fn stale_chat_window_is_not_accepted_as_target() {
+        let tree = A11yNode {
+            role: "desktop-frame".into(),
+            name: "main".into(),
+            bounds: None,
+            states: None,
+            children: Some(vec![A11yNode {
+                role: "frame".into(),
+                name: "群测试".into(),
+                bounds: None,
+                states: None,
+                children: None,
+            }]),
+        };
+
+        assert!(opened_chat_matches(&tree, "群测试"));
+        assert!(!opened_chat_matches(&tree, "uncle篮球队"));
+    }
 }
 
 pub enum SendMessagePhase {
@@ -26,7 +63,9 @@ pub enum SendMessagePhase {
 pub struct SendMessagePlanState {
     pub phase: SendMessagePhase,
     pub open_result: Option<OpenChatResult>,
+    pub open_attempts: u8,
     pub confirm_attempts: u32,
+    pub send_retries: u8,
 }
 
 fn find_edit_and_send_button(a11y: &A11yNode) -> Option<(&A11yNode, &A11yNode)> {
@@ -72,6 +111,44 @@ fn find_edit_send_pair(node: &A11yNode) -> Option<(&A11yNode, &A11yNode)> {
     None
 }
 
+fn contains_message(node: &A11yNode, message: &str) -> bool {
+    if node.name == message {
+        return true;
+    }
+    node.children
+        .as_ref()
+        .map(|children| children.iter().any(|child| contains_message(child, message)))
+        .unwrap_or(false)
+}
+
+fn opened_chat_matches(node: &A11yNode, chat_name: &str) -> bool {
+    let expected = chat_name.trim();
+    if expected.is_empty() {
+        return false;
+    }
+    if node.role == "frame"
+        && (node.name == expected || node.name.starts_with(&format!("{expected}(")))
+    {
+        return true;
+    }
+    node.children
+        .as_ref()
+        .map(|children| children.iter().any(|child| opened_chat_matches(child, expected)))
+        .unwrap_or(false)
+}
+
+fn confirmation_can_finish(
+    message_visible: bool,
+    send_button_disabled: bool,
+    has_non_text_payload: bool,
+) -> bool {
+    if has_non_text_payload {
+        send_button_disabled
+    } else {
+        message_visible
+    }
+}
+
 #[async_trait::async_trait]
 impl Plan for SendMessagePlan {
     type PlanState = SendMessagePlanState;
@@ -83,7 +160,9 @@ impl Plan for SendMessagePlan {
         SendMessagePlanState {
             phase: SendMessagePhase::Opening,
             open_result: None,
+            open_attempts: 0,
             confirm_attempts: 0,
+            send_retries: 0,
         }
     }
 
@@ -126,7 +205,13 @@ impl Plan for SendMessagePlan {
                     });
 
                     let force = main_state_id == Some("chat");
-                    let result = open_chat(&params.chat_id, force, click_xy).await;
+                    let result = open_chat(
+                        &params.chat_id,
+                        force,
+                        click_xy,
+                        params.chat_name.as_deref(),
+                    )
+                    .await;
 
                     if !result.ok {
                         return None;
@@ -148,6 +233,20 @@ impl Plan for SendMessagePlan {
                 SendMessagePhase::Focusing => {
                     if main_state_id != Some("chat_open") {
                         return None;
+                    }
+
+                    if let Some(chat_name) = params.chat_name.as_deref() {
+                        if !opened_chat_matches(a11y, chat_name) {
+                            if plan_state.open_attempts < 2 {
+                                plan_state.open_attempts += 1;
+                                plan_state.phase = SendMessagePhase::Opening;
+                                return Some(SelectedAction {
+                                    action: actions::wait_short(),
+                                    frame: identified.main_window.as_ref().and_then(|m| m.frame.clone()),
+                                });
+                            }
+                            return None;
+                        }
                     }
 
                     let found = find_edit_and_send_button(a11y);
@@ -178,8 +277,7 @@ impl Plan for SendMessagePlan {
                 }
 
                 SendMessagePhase::Inputting => {
-                    let found = find_edit_and_send_button(a11y);
-                    if found.is_none() {
+                    if find_edit_and_send_button(a11y).is_none() {
                         return None;
                     }
 
@@ -190,7 +288,7 @@ impl Plan for SendMessagePlan {
                         exec_command("paste-file", &[fp], &ExecOptions::default()).await;
                         return Some(SelectedAction {
                             action: actions::sequence(vec![
-                                Action::Wait { ms: 100 },
+                                Action::Wait { ms: 500 },
                                 Action::Key { combo: "Return".to_string() },
                             ]),
                             frame: identified.main_window.as_ref().and_then(|m| m.frame.clone()),
@@ -206,7 +304,7 @@ impl Plan for SendMessagePlan {
                         exec_command("paste-image", &args, &ExecOptions::default()).await;
                         return Some(SelectedAction {
                             action: actions::sequence(vec![
-                                Action::Wait { ms: 100 },
+                                Action::Wait { ms: 500 },
                                 Action::Key { combo: "Return".to_string() },
                             ]),
                             frame: identified.main_window.as_ref().and_then(|m| m.frame.clone()),
@@ -215,9 +313,9 @@ impl Plan for SendMessagePlan {
 
                     // Text
                     if let Some(msg) = &params.message {
+                        plan_state.phase = SendMessagePhase::Confirming;
                         return Some(SelectedAction {
                             action: actions::sequence(vec![
-                                Action::Key { combo: "ctrl+a".to_string() },
                                 Action::Type { text: msg.clone(), selector: None },
                                 Action::Wait { ms: 100 },
                                 Action::Key { combo: "Return".to_string() },
@@ -230,19 +328,24 @@ impl Plan for SendMessagePlan {
                 }
 
                 SendMessagePhase::Confirming => {
-                    let found = find_edit_and_send_button(a11y);
-                    let (_, send_btn) = match found {
-                        Some(f) => f,
-                        None => return None,
-                    };
-
-                    let is_disabled = send_btn
-                        .states
-                        .as_ref()
-                        .map(|s| s.iter().any(|st| st == "DISABLED"))
+                    let message_visible = params
+                        .message
+                        .as_deref()
+                        .map(|message| contains_message(a11y, message))
                         .unwrap_or(false);
 
-                    if is_disabled {
+                    let send_button_disabled = find_edit_and_send_button(a11y)
+                        .and_then(|(_, send_btn)| send_btn.states.as_ref())
+                        .map(|states| states.iter().any(|state| state == "DISABLED"))
+                        .unwrap_or(false);
+
+                    let has_non_text_payload =
+                        params.image_path.is_some() || params.file_path.is_some();
+                    if confirmation_can_finish(
+                        message_visible,
+                        send_button_disabled,
+                        has_non_text_payload,
+                    ) {
                         plan_state.phase = SendMessagePhase::Done;
                         return Some(SelectedAction {
                             action: actions::wait_short(),
@@ -251,7 +354,16 @@ impl Plan for SendMessagePlan {
                     }
 
                     plan_state.confirm_attempts += 1;
-                    if plan_state.confirm_attempts >= 5 {
+                    if plan_state.confirm_attempts >= 10 {
+                        if params.message.is_some() && plan_state.send_retries < 1 {
+                            plan_state.send_retries += 1;
+                            plan_state.confirm_attempts = 0;
+                            plan_state.phase = SendMessagePhase::Inputting;
+                            return Some(SelectedAction {
+                                action: actions::wait_short(),
+                                frame: identified.main_window.as_ref().and_then(|m| m.frame.clone()),
+                            });
+                        }
                         return None;
                     }
 

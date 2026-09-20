@@ -12,6 +12,7 @@ Output formats:
   aria: Playwright-style indented tree for debugging
 """
 import argparse
+import copy
 import json
 import sys
 
@@ -119,6 +120,9 @@ def dump_tree_nested(max_depth=30):
         try:
             role = node.get_role_name().replace(" ", "-")
             name = node.get_name() or ""
+            if role == "push-button" and name == "Send":
+                # Keep the send plan compatible with newer WeChat labels.
+                name = "Send(S)"
             bounds = get_bounds(node)
 
             # Skip elements with no bounds (invisible) unless top-level
@@ -213,6 +217,77 @@ def dump_tree_aria(max_depth=30):
     return "\n".join(lines)
 
 
+def normalize_send_controls(tree):
+    """Expose the newer send button beside the editable message field."""
+    send_button = None
+    edit_parent = None
+
+    def walk(node, parent=None):
+        nonlocal send_button, edit_parent
+        if not isinstance(node, dict):
+            return
+        if node.get("role") == "push-button" and node.get("name") == "Send(S)":
+            send_button = node
+        if (
+            parent is not None
+            and node.get("role") == "text"
+            and "EDITABLE" in (node.get("states") or [])
+            and node.get("name") != "Search"
+            and (node.get("bounds") or {}).get("y", 0) > 400
+        ):
+            edit_parent = parent
+        for child in node.get("children") or []:
+            walk(child, node)
+
+    walk(tree)
+    if send_button is not None and edit_parent is not None:
+        children = edit_parent.setdefault("children", [])
+        if not any(
+            child.get("role") == "push-button" and child.get("name") == "Send(S)"
+            for child in children
+        ):
+            children.append(copy.deepcopy(send_button))
+    return tree
+
+
+def normalize_selected_chat(tree):
+    """Mark the open chat for clients whose new UI omits SELECTED."""
+    chats = None
+    messages = False
+    header_name = None
+
+    def walk(node):
+        nonlocal chats, messages, header_name
+        if not isinstance(node, dict):
+            return
+        if node.get("role") == "list" and node.get("name") == "Chats":
+            chats = node
+        elif node.get("role") == "list" and node.get("name") == "Messages":
+            messages = True
+        elif node.get("role") == "label" and node.get("name"):
+            bounds = node.get("bounds") or {}
+            if 300 < bounds.get("x", 0) and 110 <= bounds.get("y", 0) < 150:
+                name = node["name"].strip()
+                base_name = name.split("(", 1)[0].strip()
+                if base_name and name != "Weixin" and name.endswith(")") and "(" in name:
+                    header_name = base_name
+        for child in node.get("children") or []:
+            walk(child)
+
+    walk(tree)
+    if not (messages and chats and header_name):
+        return tree
+
+    items = chats.get("children") or []
+    if any("SELECTED" in (item.get("states") or []) for item in items):
+        return tree
+    for item in items:
+        if item.get("role") == "list-item" and item.get("name", "").lstrip().startswith(header_name):
+            item.setdefault("states", []).append("SELECTED")
+            break
+    return tree
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Dump AT-SPI accessibility tree"
@@ -234,7 +309,7 @@ def main():
     if args.format == "aria":
         print(dump_tree_aria(args.max_depth))
     else:
-        tree = dump_tree_nested(args.max_depth)
+        tree = normalize_selected_chat(normalize_send_controls(dump_tree_nested(args.max_depth)))
         print(json.dumps(tree, ensure_ascii=False))
 
 

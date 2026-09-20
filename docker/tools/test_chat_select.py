@@ -68,6 +68,37 @@ class ChatSelectUiFallbackTest(unittest.TestCase):
             )
         )
 
+    def test_open_chat_requires_matching_header_not_just_message_list(self):
+        tree = {
+            "children": [
+                {"role": "frame", "name": "Weixin", "children": []},
+                {
+                    "role": "frame",
+                    "name": "群测试",
+                    "children": [{"role": "list", "name": "Messages", "children": []}],
+                },
+            ]
+        }
+
+        self.assertTrue(chat_select.opened_chat_matches(tree, "群测试"))
+        self.assertFalse(chat_select.opened_chat_matches(tree, "uncle篮球队"))
+
+    def test_selected_row_confirms_chat_when_header_is_not_exposed(self):
+        tree = {
+            "children": [
+                {
+                    "role": "list-item",
+                    "name": "群测试\n[Photo]\n08:05",
+                    "states": ["SELECTED"],
+                    "bounds": {"x": 1, "y": 2, "width": 3, "height": 4},
+                },
+                {"role": "list", "name": "Messages", "children": []},
+            ]
+        }
+
+        self.assertTrue(chat_select.selected_chat_matches(tree, "群测试"))
+        self.assertFalse(chat_select.selected_chat_matches(tree, "uncle篮球队"))
+
     def test_search_prefers_full_group_card_over_suggestion(self):
         suggestion = {
             "bounds": {"x": 273, "y": 184, "width": 320, "height": 34}

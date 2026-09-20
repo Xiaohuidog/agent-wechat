@@ -29,11 +29,6 @@ if [ "${1:-}" = "--window" ]; then
     shift
   fi
 
-  # Activate the window first
-  SCRIPT_DIR="$(dirname "$0")"
-  "$SCRIPT_DIR/window-activate" "$WIN_PID" "$WIN_X" "$WIN_Y" "$WIN_W" "$WIN_H" >/dev/null || {
-    echo "Warning: could not activate window" >&2
-  }
 fi
 
 if [ -z "${1:-}" ]; then
@@ -45,5 +40,34 @@ fi
 
 COMBO="$1"
 
-xdotool key "$COMBO"
+# Return is handled against the already-focused chat child window. Activating
+# the top-level frame here can move focus away from the editor in new WeChat.
+if [ "$COMBO" != "Return" ] && [ -n "${WIN_PID:-}" ]; then
+  SCRIPT_DIR="$(dirname "$0")"
+  "$SCRIPT_DIR/window-activate" "$WIN_PID" "$WIN_X" "$WIN_Y" "$WIN_W" "$WIN_H" >/dev/null || {
+    echo "Warning: could not activate window" >&2
+  }
+fi
+
+if [ "$COMBO" = "Return" ]; then
+  SEND_COORDS=$(a11y-dump --format json 2>/dev/null | python3 -c '
+import json, sys
+tree = json.load(sys.stdin)
+def walk(node):
+    if node.get("role") == "push-button" and node.get("name") == "Send(S)" and "DISABLED" not in (node.get("states") or []):
+        b = node.get("bounds") or {}
+        print("{:.0f} {:.0f}".format(b.get("x", 0) + b.get("width", 0) / 2, b.get("y", 0) + b.get("height", 0) / 2))
+        return True
+    return any(walk(child) for child in node.get("children") or [])
+walk(tree)
+' 2>/dev/null || true)
+  if [ -n "$SEND_COORDS" ]; then
+    read -r SEND_X SEND_Y <<< "$SEND_COORDS"
+    xdotool mousemove "$SEND_X" "$SEND_Y" click 1
+  else
+    xdotool key "$COMBO"
+  fi
+else
+  xdotool key "$COMBO"
+fi
 echo "pressed: $COMBO"

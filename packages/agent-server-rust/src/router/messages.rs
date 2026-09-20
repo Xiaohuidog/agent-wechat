@@ -12,6 +12,7 @@ use crate::ia::types::{MediaResult, Message, SendResult, SubscriptionEvent};
 use crate::plans::send_message::{SendMessageParams, SendMessagePlan};
 use crate::tools::wechat_db::{find_wechat_pid, list_account_dbs};
 use crate::tools::wechat_keys::{extract_keys_async, get_stored_keys, get_image_keys, store_keys};
+use crate::tools::wechat_chats;
 use crate::tools::wechat_media::get_message_media;
 use crate::tools::wechat_messages;
 use crate::sessions::manager::get_session;
@@ -246,6 +247,13 @@ pub async fn send_message(Json(input): Json<SendParams>) -> Json<SendResult> {
         }
     }
 
+    let chat_name = session.logged_in_user.as_ref().and_then(|logged_in_user| {
+        let db = get_db();
+        let keys = get_stored_keys(&db, &session.id, logged_in_user);
+        wechat_chats::get_chat_by_username(logged_in_user, &keys, &input.chat_id)
+            .map(|chat| chat.name)
+    });
+
     let mut context = {
         let db = get_db();
         create_context(session, &db)
@@ -254,6 +262,7 @@ pub async fn send_message(Json(input): Json<SendParams>) -> Json<SendResult> {
     let plan = SendMessagePlan;
     let params = SendMessageParams {
         chat_id: input.chat_id,
+        chat_name,
         message: input.text,
         image_path: image_path.clone(),
         image_mime,

@@ -12,13 +12,78 @@ fi
 
 TEXT="$1"
 
-# Copy to clipboard using xclip (backgrounded — xclip blocks until
-# the selection is consumed, so it must run in parallel with the paste)
-echo -n "$TEXT" | xclip -selection clipboard >/dev/null 2>&1 &
-sleep 0.1
+# Re-focus the live message editor before injecting text. The new client can
+# keep a stale accessibility focus after chat selection, which otherwise
+# makes the send plan look successful while typing into no editor.
+EDITOR_COORDS=$(a11y-dump --format json 2>/dev/null | python3 -c '
+import json, sys
+tree = json.load(sys.stdin)
+def walk(node):
+    if (
+        node.get("role") == "text"
+        and node.get("name") == "Enter"
+        and "EDITABLE" in (node.get("states") or [])
+    ):
+        b = node.get("bounds") or {}
+        print("{:.0f} {:.0f}".format(
+            b.get("x", 0) + b.get("width", 0) / 2,
+            b.get("y", 0) + b.get("height", 0) / 2,
+        ))
+        return True
+    return any(walk(child) for child in node.get("children") or [])
+walk(tree)
+' 2>/dev/null || true)
+if [ -n "$EDITOR_COORDS" ]; then
+  read -r EDITOR_X EDITOR_Y <<< "$EDITOR_COORDS"
+  xdotool mousemove "$EDITOR_X" "$EDITOR_Y" click 1
+fi
 
-# Paste using Ctrl+V (consumes the clipboard, letting xclip exit)
-xdotool key ctrl+v
+# The current Qt client accepts direct X11 key events for ASCII, while its
+# old clipboard target is unreliable. This is the primary path for normal
+# short replies such as the reported "sb" case.
+if ! printf '%s' "$TEXT" | LC_ALL=C grep -q '[^ -~]'; then
+  xdotool type --clearmodifiers --delay 1 -- "$TEXT"
+else
+  # Keep an AT-SPI fallback for clients that expose a working editable-text
+  # bridge; callers still verify the real send result separately.
+  if ! python3 - "$TEXT" <<'PY'
+import sys
+import gi
+
+gi.require_version("Atspi", "2.0")
+from gi.repository import Atspi
+
+message = sys.argv[1]
+Atspi.init()
+
+def set_editor(node):
+    try:
+        if (
+            node.get_role_name() == "text"
+            and node.get_name() == "Enter"
+            and "EDITABLE" in [s.value_name for s in node.get_state_set().get_states()]
+        ):
+            editor = node.get_editable_text_iface()
+            editor.set_text_contents(message)
+            return editor.get_text(0, -1) == message
+        for index in range(node.get_child_count()):
+            if set_editor(node.get_child_at_index(index)):
+                return True
+    except Exception:
+        return False
+    return False
+
+if not set_editor(Atspi.get_desktop(0)):
+    raise SystemExit("message editor was not updated")
+PY
+  then
+    printf '%s' "$TEXT" | xclip -selection clipboard -t UTF8_STRING -loops 1 >/dev/null 2>&1 &
+    CLIPBOARD_PID=$!
+    trap 'kill "$CLIPBOARD_PID" 2>/dev/null || true' EXIT
+    sleep 0.2
+    xdotool key --clearmodifiers ctrl+v
+  fi
+fi
 
 # Small delay after paste
 sleep 0.05

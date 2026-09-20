@@ -305,6 +305,16 @@ pub async fn send_message(Json(input): Json<SendParams>) -> Json<SendResult> {
         }
     };
 
+    let baseline_local_id = input.text.as_ref().and_then(|_| {
+        let logged_in_user = session.logged_in_user.as_ref()?;
+        let db = get_db();
+        let keys = get_stored_keys(&db, &session.id, logged_in_user);
+        wechat_messages::list_messages(logged_in_user, &keys, &input.chat_id, 1, 0)
+            .into_iter()
+            .map(|message| message.local_id)
+            .next()
+    });
+
     let mut context = {
         let db = get_db();
         create_context(session, &db)
@@ -318,6 +328,7 @@ pub async fn send_message(Json(input): Json<SendParams>) -> Json<SendResult> {
         image_path: image_path.clone(),
         image_mime,
         file_path: file_path.clone(),
+        baseline_local_id,
     };
     let cancel = CancellationToken::new();
     let noop_emit = |_: SubscriptionEvent| {};

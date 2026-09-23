@@ -15,6 +15,9 @@ jobs:
       - name: Verify image cache identity regression on Linux
         run: cargo test --manifest-path packages/agent-server-rust/Cargo.toml derives_a_download_target_from_any_exact_image_variant
 
+      - name: Verify timed-out image helper exits on Linux
+        run: cargo test --manifest-path packages/agent-server-rust/Cargo.toml timed_out_command_does_not_leave_a_child_running
+
       - name: Prepare Docker context
         run: |
           rm -rf docker/agent-server-rust

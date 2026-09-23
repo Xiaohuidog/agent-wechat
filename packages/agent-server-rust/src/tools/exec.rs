@@ -81,3 +81,28 @@ pub async fn exec_command(
         },
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn timed_out_command_does_not_leave_a_child_running() {
+        let directory = tempfile::tempdir().unwrap();
+        let pid_path = directory.path().join("child.pid");
+        let script = "import os,sys,time; open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(30)";
+        let result = exec_command(
+            "python3",
+            &["-c", script, pid_path.to_str().unwrap()],
+            &ExecOptions { timeout_ms: 500, ..Default::default() },
+        ).await;
+        assert_eq!(result.stderr, "Command timed out");
+        let pid: u32 = std::fs::read_to_string(&pid_path).unwrap().parse().unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let alive = std::path::Path::new(&format!("/proc/{pid}")).exists();
+        if alive {
+            let _ = std::process::Command::new("kill").arg(pid.to_string()).status();
+        }
+        assert!(!alive, "timed-out child process {pid} was left running");
+    }
+}

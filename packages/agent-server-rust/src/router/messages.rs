@@ -205,6 +205,12 @@ pub async fn resolve_media(chat_id: &str, local_id: i64) -> MediaResult {
         return cached_media;
     }
 
+    // Images without a known AES key are recovered by the exact-message UI
+    // download operation; repeated key extraction here blocks that queue.
+    if cached_media.media_type == "image" {
+        return cached_media;
+    }
+
     // The regular database keys can already be present after login while the
     // image AES key is still missing. Retry extraction before returning an
     // empty image payload so existing .dat files can be decrypted.

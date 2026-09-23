@@ -52,6 +52,7 @@ pub async fn exec_command(
 
     let result = tokio::time::timeout(timeout, async {
         let output = Command::new(command)
+            .kill_on_drop(true)
             .args(args)
             .envs(&env)
             .output()

@@ -6,4 +6,5 @@ LABEL org.opencontainers.image.revision=${SOURCE_SHA}
 
 COPY agent-server /opt/agent-server/agent-server
 COPY image-download /opt/tools/image-download
+RUN python3 -m pip install --no-cache-dir 'Pillow==12.3.0'
 RUN chmod 0755 /opt/agent-server/agent-server /opt/tools/image-download

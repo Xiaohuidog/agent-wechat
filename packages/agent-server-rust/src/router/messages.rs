@@ -186,10 +186,25 @@ pub async fn resolve_media(chat_id: &str, local_id: i64) -> MediaResult {
         }
     }
 
-    let image_keys = {
+    let mut image_keys = {
         let db = get_db();
         get_image_keys(&db, &session.id, &logged_in_user)
     };
+
+    // The regular database keys can already be present after login while the
+    // image AES key is still missing. Retry extraction before returning an
+    // empty image payload so existing .dat files can be decrypted.
+    if image_keys.is_none() {
+        if let Some(pid) = find_wechat_pid() {
+            let extracted = extract_keys_async(pid).await;
+            if !extracted.is_empty() {
+                let db = get_db();
+                store_keys(&db, &session.id, &logged_in_user, &extracted);
+                image_keys = get_image_keys(&db, &session.id, &logged_in_user);
+                keys = get_stored_keys(&db, &session.id, &logged_in_user);
+            }
+        }
+    }
 
     get_message_media(
         &logged_in_user,

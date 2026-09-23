@@ -6,6 +6,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -80,6 +81,16 @@ def image_rows(value, geometry):
         ):
             rows.append(node)
     return rows
+
+
+def image_click_point(row):
+    bounds = row["bounds"]
+    # Accessibility exposes the full chat-width row, while the image itself
+    # is left-aligned inside it; clicking the row center misses the image.
+    return {
+        "x": round(float(bounds["x"]) + min(180, float(bounds["width"]) / 2)),
+        "y": round(float(bounds["y"]) + float(bounds["height"]) / 2),
+    }
 
 
 def _normalized_difference(left, right):
@@ -185,26 +196,66 @@ def capture():
             pass
 
 
-def wait_for_full_image(image_dir, stem, thumbnail_size, timeout_seconds=120):
-    candidates = [image_dir / f"{stem}_h.dat", image_dir / f"{stem}.dat"]
-    previous = {}
-    stable = {}
+def publish_saved_image(source, preview_path):
+    source = pathlib.Path(source)
+    preview_path = pathlib.Path(preview_path)
+    os.replace(source, preview_path)
+    # The running agent resolves <hash>_h.dat to <hash>_h_preview.jpg.
+    high_resolution_preview = preview_path.with_name(
+        preview_path.name.removesuffix("_preview.jpg") + "_h_preview.jpg"
+    )
+    link_path = high_resolution_preview.with_name(high_resolution_preview.name + ".new")
+    link_path.unlink(missing_ok=True)
+    os.link(preview_path, link_path)
+    os.replace(link_path, high_resolution_preview)
+
+
+def native_image_path(image_dir, stem):
+    match = re.fullmatch(
+        r"(?P<account>/home/wechat(?:/Documents)?/xwechat_files/[^/]+)/msg/attach/[0-9a-f]{32}/\d{4}-\d{2}/Img",
+        str(image_dir),
+    )
+    if match is None or re.fullmatch(r"[0-9a-f]{32}", stem) is None:
+        raise DownloadError("IMAGE_TARGET_PATH_INVALID")
+    return pathlib.Path(match.group("account")) / "temp" / "ImageUtils" / f"{stem}_h.jpg"
+
+
+def native_image_size(path, timeout_seconds=20):
     deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        for path in candidates:
-            try:
-                size = path.stat().st_size
-            except OSError:
-                size = 0
-            if size > thumbnail_size and size == previous.get(path):
-                stable[path] = stable.get(path, 0) + 1
-                if stable[path] >= 2:
-                    return path, size
-            else:
-                stable[path] = 0
-            previous[path] = size
-        time.sleep(1)
-    raise DownloadError("IMAGE_CACHE_TIMEOUT")
+    while True:
+        try:
+            with Image.open(path) as image:
+                image.verify()
+            size = path.stat().st_size
+            if size > 0:
+                return size
+        except (FileNotFoundError, OSError):
+            pass
+        if time.monotonic() >= deadline:
+            raise DownloadError("IMAGE_NATIVE_DECODE_MISSING")
+        time.sleep(0.2)
+
+
+def publish_native_image(native_path, image_dir, stem, local_id, preview_path, timeout_seconds=0):
+    if native_path.name != f"{stem}_h.jpg":
+        raise DownloadError("IMAGE_IDENTITY_MISMATCH")
+    size = native_image_size(native_path, timeout_seconds=timeout_seconds)
+    export_path = image_dir / f"{stem}_export_{local_id}.jpg"
+    shutil.copyfile(native_path, export_path)
+    publish_saved_image(export_path, preview_path)
+    return size
+
+
+def selected_chat(value, chat_name):
+    return any(
+        item.get("role") == "list-item"
+        and "SELECTED" in (item.get("states") or [])
+        and (
+            item.get("name") == chat_name
+            or str(item.get("name") or "").startswith(chat_name + " ")
+        )
+        for item in walk(value)
+    )
 
 
 def parse_args():
@@ -236,20 +287,21 @@ def main():
     ) is not None
     if not (valid_stem and valid_image_dir and valid_thumbnail and valid_preview):
         fail("IMAGE_TARGET_PATH_INVALID")
-    thumbnail_dat = image_dir / f"{args.stem}_t.dat"
+    if pathlib.Path(args.preview_path) != image_dir / f"{args.stem}_preview.jpg":
+        fail("IMAGE_TARGET_PATH_INVALID")
     try:
-        thumbnail_size = thumbnail_dat.stat().st_size
-    except OSError:
-        thumbnail_size = 0
-
-    try:
+        native_path = native_image_path(image_dir, args.stem)
+        if native_path.is_file():
+            size = publish_native_image(native_path, image_dir, args.stem, args.local_id, args.preview_path)
+            print(json.dumps({"ok": True, "sizeBytes": size, "variant": "wechat-native-cache"}))
+            return
         geometry = weixin_geometry()
-        if args.thumbnail:
+        if not selected_chat(tree(), args.chat_name):
             selected = command(
                 "/opt/tools/chat-select", "--chat-name", args.chat_name, args.chat_id, timeout=60
             )
             selected_payload = json.loads(selected.stdout)
-            if not selected_payload.get("ok"):
+            if not selected_payload.get("ok") or not selected_chat(tree(), args.chat_name):
                 raise DownloadError("CHAT_OPEN_FAILED")
             time.sleep(1)
         # The database gate guarantees this is the newest message. Move the
@@ -260,30 +312,27 @@ def main():
         time.sleep(0.8)
         current_tree = tree()
         rows = image_rows(current_tree, geometry)
-        screenshot = capture()
         if args.thumbnail:
+            screenshot = capture()
             with Image.open(args.thumbnail) as target_image:
                 match = find_unique_match(screenshot, target_image.convert("RGB"), rows)
         else:
             if not rows:
                 raise DownloadError("IMAGE_CARD_NOT_FOUND")
             row = max(rows, key=lambda value: float(value["bounds"]["y"]))
-            bounds = row["bounds"]
-            left = max(0, round(float(bounds["x"]) + 48))
-            top = max(0, round(float(bounds["y"]) + 3))
-            right = min(screenshot.width, round(float(bounds["x"]) + float(bounds["width"]) - 8))
-            bottom = min(screenshot.height, round(float(bounds["y"]) + float(bounds["height"]) - 3))
-            screenshot.crop((left, top, right, bottom)).save(args.preview_path, "JPEG", quality=92)
-            match = {"x": round((left + right) / 2), "y": round((top + bottom) / 2)}
+            match = image_click_point(row)
         command("xdotool", "mousemove", str(match["x"]), str(match["y"]), "click", "1")
         try:
-            path, size = wait_for_full_image(image_dir, args.stem, thumbnail_size)
+            size = publish_native_image(
+                native_path, image_dir, args.stem, args.local_id,
+                args.preview_path, timeout_seconds=20,
+            )
         finally:
             command("xdotool", "key", "--clearmodifiers", "Escape", check=False)
     except (DownloadError, json.JSONDecodeError) as error:
         fail(str(error) if isinstance(error, DownloadError) else "CHAT_OPEN_RESPONSE_INVALID")
 
-    print(json.dumps({"ok": True, "sizeBytes": size, "variant": path.name[-6:]}))
+    print(json.dumps({"ok": True, "sizeBytes": size, "variant": "wechat-native-cache"}))
 
 
 if __name__ == "__main__":

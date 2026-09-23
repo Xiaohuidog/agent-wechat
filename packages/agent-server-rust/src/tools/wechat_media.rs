@@ -91,10 +91,7 @@ fn image_dat_variant_path(dat_path: &Path, variant: ImageDatVariant) -> Option<P
 
 fn image_download_cache_target(dat_path: &Path) -> Option<(PathBuf, String)> {
     let name = dat_path.file_name()?.to_str()?;
-    let (stem, variant) = parse_image_dat_name(name)?;
-    if variant != ImageDatVariant::Thumbnail {
-        return None;
-    }
+    let (stem, _) = parse_image_dat_name(name)?;
     Some((dat_path.parent()?.to_path_buf(), stem.to_string()))
 }
 
@@ -239,7 +236,7 @@ fn get_image_thumbnail(
 
 fn get_saved_image_preview(dat_path: &str, local_id: i64) -> Option<MediaResult> {
     let path = Path::new(dat_path);
-    let stem = path.file_stem()?.to_str()?;
+    let (stem, _) = parse_image_dat_name(path.file_name()?.to_str()?)?;
     let preview_path = path.parent()?.join(format!("{stem}_preview.jpg"));
     let data = fs::read(preview_path).ok()?;
     Some(MediaResult {
@@ -708,9 +705,9 @@ fn find_unique_video_hash_by_time(video_dir: &Path, create_time: i64) -> Option<
     candidates.into_iter().next()
 }
 
-/// Resolve the exact thumbnail cache identity that a UI fetch must upgrade.
-/// A medium or high-resolution file means no UI action is needed; an ambiguous
-/// timestamp match returns None and therefore cannot produce a click target.
+/// Resolve the exact image cache identity that a UI fetch must upgrade.
+/// Encrypted medium/high-resolution files still need a native export when the
+/// image AES key is unavailable. Ambiguous matches fail closed.
 pub fn get_image_download_cache_target(
     account_dir: &str,
     keys: &HashMap<String, String>,
@@ -1272,7 +1269,8 @@ pub fn get_message_media(
 mod timestamp_fallback_tests {
     use super::{
         find_best_image_dat, find_unique_dat_by_time, find_unique_video_hash_by_time,
-        image_dat_variant_path, image_download_cache_target, image_filename, ImageDatVariant,
+        get_saved_image_preview, image_dat_variant_path, image_download_cache_target,
+        image_filename, ImageDatVariant,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1411,14 +1409,35 @@ mod timestamp_fallback_tests {
     }
 
     #[test]
-    fn derives_a_download_target_only_from_an_exact_thumbnail_variant() {
+    fn derives_a_download_target_from_any_exact_image_variant() {
         let thumbnail = Path::new("/tmp/image-a_t.dat");
         let medium = Path::new("/tmp/image-a.dat");
+        let high = Path::new("/tmp/image-a_h.dat");
 
         assert_eq!(
             image_download_cache_target(thumbnail),
             Some((PathBuf::from("/tmp"), "image-a".to_string()))
         );
-        assert_eq!(image_download_cache_target(medium), None);
+        assert_eq!(
+            image_download_cache_target(medium),
+            Some((PathBuf::from("/tmp"), "image-a".to_string()))
+        );
+        assert_eq!(
+            image_download_cache_target(high),
+            Some((PathBuf::from("/tmp"), "image-a".to_string()))
+        );
+    }
+
+    #[test]
+    fn serves_native_export_for_high_resolution_dat_variant() {
+        let temporary = TempDir::new().unwrap();
+        let high_resolution = temporary.path().join("image-a_h.dat");
+        fs::write(&high_resolution, b"encrypted").unwrap();
+        fs::write(temporary.path().join("image-a_preview.jpg"), b"native-jpeg").unwrap();
+
+        let media = get_saved_image_preview(high_resolution.to_str().unwrap(), 22).unwrap();
+        assert_eq!(media.filename, "msg_22.jpg");
+        assert_eq!(media.format, "jpeg");
+        assert_eq!(media.data.as_deref(), Some("bmF0aXZlLWpwZWc="));
     }
 }

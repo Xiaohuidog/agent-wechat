@@ -12,6 +12,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Verify image cache identity regression on Linux
+        run: cargo test --manifest-path packages/agent-server-rust/Cargo.toml derives_a_download_target_from_any_exact_image_variant
+
       - name: Prepare Docker context
         run: |
           rm -rf docker/agent-server-rust

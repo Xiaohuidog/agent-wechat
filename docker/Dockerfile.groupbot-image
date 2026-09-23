@@ -1,0 +1,9 @@
+ARG BASE_IMAGE=agent-wechat:0.12.0-amd64
+FROM ${BASE_IMAGE}
+
+ARG SOURCE_SHA
+LABEL org.opencontainers.image.revision=${SOURCE_SHA}
+
+COPY agent-server /opt/agent-server/agent-server
+COPY image-download /opt/tools/image-download
+RUN chmod 0755 /opt/agent-server/agent-server /opt/tools/image-download

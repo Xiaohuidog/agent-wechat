@@ -2,6 +2,7 @@
 """Fail-closed WeChat image fetch helper used by the agent API."""
 
 import argparse
+import io
 import json
 import os
 import pathlib
@@ -258,6 +259,81 @@ def selected_chat(value, chat_name):
     )
 
 
+def unique_chat_item(value, chat_name):
+    matches = [
+        item for item in walk(value)
+        if item.get("role") == "list-item"
+        and isinstance(item.get("name"), str)
+        and (item["name"] == chat_name or item["name"].startswith(chat_name + " "))
+        and item.get("bounds")
+    ]
+    if len(matches) > 1:
+        raise DownloadError("CHAT_IDENTITY_AMBIGUOUS")
+    if not matches:
+        raise DownloadError("CHAT_UI_NOT_FOUND")
+    return matches[0]
+
+
+def select_chat(chat_name):
+    current = tree()
+    if selected_chat(current, chat_name):
+        return
+    item = unique_chat_item(current, chat_name)
+    bounds = item["bounds"]
+    x = round(float(bounds["x"]) + float(bounds["width"]) / 2)
+    y = round(float(bounds["y"]) + float(bounds["height"]) / 2)
+    command("xdotool", "mousemove", str(x), str(y), "click", "1")
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline:
+        if selected_chat(tree(), chat_name):
+            return
+        time.sleep(0.4)
+    raise DownloadError("CHAT_UI_SELECT_UNCONFIRMED")
+
+
+def publish_clipboard_image(data, preview_path):
+    preview_path = pathlib.Path(preview_path)
+    try:
+        with Image.open(io.BytesIO(data)) as source:
+            source.load()
+            if source.format != "PNG" or min(source.size) < 2:
+                raise DownloadError("IMAGE_CLIPBOARD_INVALID")
+            image = source.convert("RGB")
+    except (OSError, ValueError) as error:
+        raise DownloadError("IMAGE_CLIPBOARD_INVALID") from error
+    with tempfile.NamedTemporaryFile(dir=preview_path.parent, suffix=".jpg", delete=False) as output:
+        temporary = pathlib.Path(output.name)
+    try:
+        image.save(temporary, "JPEG", quality=95, subsampling=0)
+        size = temporary.stat().st_size
+        publish_saved_image(temporary, preview_path)
+        return size
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def copy_viewer_image(preview_path):
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        active = command("xdotool", "getactivewindow", "getwindowname", check=False)
+        if active.stdout.strip() == "Photos and Videos":
+            break
+        time.sleep(0.3)
+    else:
+        raise DownloadError("IMAGE_VIEWER_NOT_OPEN")
+    command("xdotool", "key", "--clearmodifiers", "ctrl+c")
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        copied = subprocess.run(
+            ["xclip", "-selection", "clipboard", "-t", "image/png", "-o"],
+            capture_output=True, timeout=5,
+        )
+        if copied.returncode == 0 and copied.stdout:
+            return publish_clipboard_image(copied.stdout, preview_path)
+        time.sleep(0.3)
+    raise DownloadError("IMAGE_CLIPBOARD_UNAVAILABLE")
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--chat-id", required=True)
@@ -291,19 +367,14 @@ def main():
         fail("IMAGE_TARGET_PATH_INVALID")
     try:
         native_path = native_image_path(image_dir, args.stem)
+        variant = "wechat-native-cache"
         if native_path.is_file():
             size = publish_native_image(native_path, image_dir, args.stem, args.local_id, args.preview_path)
             print(json.dumps({"ok": True, "sizeBytes": size, "variant": "wechat-native-cache"}))
             return
         geometry = weixin_geometry()
-        if not selected_chat(tree(), args.chat_name):
-            selected = command(
-                "/opt/tools/chat-select", "--chat-name", args.chat_name, args.chat_id, timeout=60
-            )
-            selected_payload = json.loads(selected.stdout)
-            if not selected_payload.get("ok") or not selected_chat(tree(), args.chat_name):
-                raise DownloadError("CHAT_OPEN_FAILED")
-            time.sleep(1)
+        select_chat(args.chat_name)
+        time.sleep(1)
         # The database gate guarantees this is the newest message. Move the
         # message view to its end, then require a unique visual identity match.
         scroll_x = round(geometry["X"] + geometry["WIDTH"] * 0.72)
@@ -321,18 +392,31 @@ def main():
                 raise DownloadError("IMAGE_CARD_NOT_FOUND")
             row = max(rows, key=lambda value: float(value["bounds"]["y"]))
             match = image_click_point(row)
+        cleared = subprocess.run(
+            ["xclip", "-selection", "clipboard", "-i"],
+            input=b"GROUPBOT_IMAGE_CLIPBOARD_SENTINEL",
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5,
+        )
+        if cleared.returncode != 0:
+            raise DownloadError("IMAGE_CLIPBOARD_CLEAR_FAILED")
         command("xdotool", "mousemove", str(match["x"]), str(match["y"]), "click", "1")
         try:
-            size = publish_native_image(
-                native_path, image_dir, args.stem, args.local_id,
-                args.preview_path, timeout_seconds=20,
-            )
+            try:
+                size = publish_native_image(
+                    native_path, image_dir, args.stem, args.local_id,
+                    args.preview_path, timeout_seconds=0,
+                )
+            except DownloadError as error:
+                if str(error) != "IMAGE_NATIVE_DECODE_MISSING":
+                    raise
+                size = copy_viewer_image(args.preview_path)
+                variant = "viewer-clipboard"
         finally:
             command("xdotool", "key", "--clearmodifiers", "Escape", check=False)
     except (DownloadError, json.JSONDecodeError) as error:
         fail(str(error) if isinstance(error, DownloadError) else "CHAT_OPEN_RESPONSE_INVALID")
 
-    print(json.dumps({"ok": True, "sizeBytes": size, "variant": "wechat-native-cache"}))
+    print(json.dumps({"ok": True, "sizeBytes": size, "variant": variant}))
 
 
 if __name__ == "__main__":

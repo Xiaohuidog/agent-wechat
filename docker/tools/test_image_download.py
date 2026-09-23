@@ -1,5 +1,6 @@
 import importlib.machinery
 import importlib.util
+import io
 import pathlib
 import tempfile
 import threading
@@ -70,6 +71,36 @@ class ImageMatchTest(unittest.TestCase):
 
 
 class NativeImageSaveTest(unittest.TestCase):
+    def test_identifies_only_one_target_chat_item(self):
+        target = {"role": "list-item", "name": "群测试 小晖Allen: [Photo]", "bounds": {"x": 212, "y": 318, "width": 210, "height": 68}}
+        tree = {"children": [target, {"role": "list-item", "name": "其他群", "bounds": {"x": 212, "y": 400, "width": 210, "height": 68}}]}
+
+        self.assertEqual(image_download.unique_chat_item(tree, "群测试"), target)
+        with self.assertRaisesRegex(image_download.DownloadError, "CHAT_IDENTITY_AMBIGUOUS"):
+            image_download.unique_chat_item({"children": [target, target]}, "群测试")
+
+    def test_publishes_decoded_clipboard_image_at_full_resolution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = pathlib.Path(directory)
+            data = io.BytesIO()
+            Image.new("RGB", (1707, 1280), "#19a7c0").save(data, "PNG")
+            target = folder / "image-a_preview.jpg"
+
+            size = image_download.publish_clipboard_image(data.getvalue(), target)
+
+            self.assertGreater(size, 0)
+            with Image.open(target) as image:
+                self.assertEqual(image.format, "JPEG")
+                self.assertEqual(image.size, (1707, 1280))
+            self.assertEqual(target.read_bytes(), (folder / "image-a_h_preview.jpg").read_bytes())
+
+    def test_rejects_non_image_clipboard_payload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = pathlib.Path(directory) / "image-a_preview.jpg"
+            with self.assertRaisesRegex(image_download.DownloadError, "IMAGE_CLIPBOARD_INVALID"):
+                image_download.publish_clipboard_image(b"not an image", target)
+            self.assertFalse(target.exists())
+
     def test_native_path_is_bound_to_source_file_hash(self):
         stem = "b" * 32
         directory = pathlib.Path("/home/wechat/xwechat_files/account/msg/attach/" + "a" * 32 + "/2026-09/Img")

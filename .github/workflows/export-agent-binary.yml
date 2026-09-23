@@ -1,0 +1,38 @@
+name: Export Agent Binary
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare Docker context
+        run: |
+          rm -rf docker/agent-server-rust
+          mkdir -p docker/agent-server-rust
+          cp packages/agent-server-rust/Cargo.toml docker/agent-server-rust/
+          cp packages/agent-server-rust/Cargo.lock docker/agent-server-rust/
+          cp -r packages/agent-server-rust/src docker/agent-server-rust/
+          cp -r packages/agent-server-rust/migrations docker/agent-server-rust/
+
+      - name: Build amd64 agent binary
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            --target builder \
+            --build-arg BUILD_MODE=release \
+            --output type=local,dest=/tmp/agent-output \
+            docker
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-server-amd64
+          path: /tmp/agent-output/agent-server
+          if-no-files-found: error
+          retention-days: 1

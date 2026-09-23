@@ -237,6 +237,23 @@ fn get_image_thumbnail(
     None
 }
 
+fn get_saved_image_preview(dat_path: &str, local_id: i64) -> Option<MediaResult> {
+    let path = Path::new(dat_path);
+    let stem = path.file_stem()?.to_str()?;
+    let preview_path = path.parent()?.join(format!("{stem}_preview.jpg"));
+    let data = fs::read(preview_path).ok()?;
+    Some(MediaResult {
+        media_type: "image".into(),
+        data: Some(base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            data,
+        )),
+        url: None,
+        format: "jpeg".into(),
+        filename: image_filename(local_id, "jpg", false),
+    })
+}
+
 // ── .dat file decryption ─────────────────────────────────────────────────────
 
 fn aligned_aes_size(enc_chunk_size: u32) -> u32 {
@@ -1195,6 +1212,19 @@ pub fn get_message_media(
                 );
             } else {
                 tracing::warn!("[media] no image keys available for local_id={}", local_id);
+            }
+
+            if let Some(dat_path) = find_dat_via_resource_db(
+                account_dir,
+                keys,
+                chat_id,
+                local_id,
+                create_time,
+            ) {
+                if let Some(preview) = get_saved_image_preview(&dat_path, local_id) {
+                    tracing::info!("[media] using saved UI preview for local_id={}", local_id);
+                    return preview;
+                }
             }
 
             if let Some(thumb) =

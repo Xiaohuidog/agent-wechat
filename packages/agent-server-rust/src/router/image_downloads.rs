@@ -182,44 +182,45 @@ async fn run(id: String) {
         update_state(&id, "failed", Some("IMAGE_CACHE_IDENTITY_UNAVAILABLE"));
         return;
     };
-    let Some(thumbnail_data) = cached.data.as_deref() else {
-        update_state(&id, "failed", Some("IMAGE_THUMBNAIL_UNAVAILABLE"));
-        return;
-    };
-    let Ok(thumbnail_bytes) = base64::engine::general_purpose::STANDARD.decode(thumbnail_data)
-    else {
-        update_state(&id, "failed", Some("IMAGE_THUMBNAIL_INVALID"));
-        return;
-    };
     let thumbnail_path = format!("/tmp/agent-image-{id}.jpg");
-    if std::fs::write(&thumbnail_path, thumbnail_bytes).is_err() {
-        update_state(&id, "failed", Some("IMAGE_THUMBNAIL_WRITE_FAILED"));
-        return;
+    let preview_path = target
+        .image_dir
+        .join(format!("{}_preview.jpg", target.stem));
+    let mut args = vec![
+        "--chat-id".to_string(),
+        operation.chat_id.clone(),
+        "--chat-name".to_string(),
+        chat.name.clone(),
+        "--local-id".to_string(),
+        operation.local_id.to_string(),
+        "--image-dir".to_string(),
+        target.image_dir.to_string_lossy().to_string(),
+        "--stem".to_string(),
+        target.stem.clone(),
+        "--preview-path".to_string(),
+        preview_path.to_string_lossy().to_string(),
+    ];
+    if let Some(thumbnail_data) = cached.data.as_deref() {
+        let Ok(thumbnail_bytes) = base64::engine::general_purpose::STANDARD.decode(thumbnail_data)
+        else {
+            update_state(&id, "failed", Some("IMAGE_THUMBNAIL_INVALID"));
+            return;
+        };
+        if std::fs::write(&thumbnail_path, thumbnail_bytes).is_err() {
+            update_state(&id, "failed", Some("IMAGE_THUMBNAIL_WRITE_FAILED"));
+            return;
+        }
+        args.splice(0..0, ["--thumbnail".to_string(), thumbnail_path.clone()]);
     }
 
     update_state(&id, "triggering", None);
-    let local_id = operation.local_id.to_string();
-    let image_dir = target.image_dir.to_string_lossy().to_string();
     let options = ExecOptions {
         session: Some(session),
         timeout_ms: 300_000,
     };
     let result = exec_command(
         "/opt/tools/image-download",
-        &[
-            "--chat-id",
-            &operation.chat_id,
-            "--chat-name",
-            &chat.name,
-            "--local-id",
-            &local_id,
-            "--thumbnail",
-            &thumbnail_path,
-            "--image-dir",
-            &image_dir,
-            "--stem",
-            &target.stem,
-        ],
+        &args.iter().map(String::as_str).collect::<Vec<_>>(),
         &options,
     )
     .await;

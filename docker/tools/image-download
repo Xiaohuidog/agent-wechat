@@ -71,7 +71,7 @@ def image_rows(value, geometry):
             continue
         if (
             node.get("role") == "list-item"
-            and node.get("name") == "Image"
+            and str(node.get("name") or "").strip() == "Image"
             and width >= 500
             and height >= 60
             and x >= geometry["X"]
@@ -175,7 +175,7 @@ def capture():
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as output:
         path = output.name
     try:
-        command("scrot", path, timeout=10)
+        command("scrot", "-o", path, timeout=10)
         with Image.open(path) as image:
             return image.convert("RGB")
     finally:
@@ -212,7 +212,8 @@ def parse_args():
     parser.add_argument("--chat-id", required=True)
     parser.add_argument("--chat-name", required=True)
     parser.add_argument("--local-id", required=True, type=int)
-    parser.add_argument("--thumbnail", required=True)
+    parser.add_argument("--thumbnail")
+    parser.add_argument("--preview-path", required=True)
     parser.add_argument("--image-dir", required=True)
     parser.add_argument("--stem", required=True)
     return parser.parse_args()
@@ -221,27 +222,36 @@ def parse_args():
 def main():
     args = parse_args()
     image_dir = pathlib.Path(args.image_dir)
-    if (
-        re.fullmatch(r"[0-9a-f]{32}", args.stem) is None
-        or re.fullmatch(r"/home/wechat(?:/Documents)?/xwechat_files/[^/]+/msg/attach/[0-9a-f]{32}/\d{4}-\d{2}/Img", str(image_dir)) is None
-        or re.fullmatch(r"/tmp/agent-image-[0-9a-f-]+\.jpg", args.thumbnail) is None
-    ):
+    valid_stem = re.fullmatch(r"[0-9a-f]{32}", args.stem) is not None
+    valid_image_dir = re.fullmatch(
+        r"/home/wechat(?:/Documents)?/xwechat_files/[^/]+/msg/attach/[0-9a-f]{32}/\d{4}-\d{2}/Img",
+        str(image_dir),
+    ) is not None
+    valid_thumbnail = args.thumbnail is None or re.fullmatch(
+        r"/tmp/agent-image-[0-9a-f-]+\.jpg", args.thumbnail
+    ) is not None
+    valid_preview = re.fullmatch(
+        r"/home/wechat(?:/Documents)?/xwechat_files/[^/]+/msg/attach/[0-9a-f]{32}/\d{4}-\d{2}/Img/[0-9a-f]{32}_preview\.jpg",
+        args.preview_path,
+    ) is not None
+    if not (valid_stem and valid_image_dir and valid_thumbnail and valid_preview):
         fail("IMAGE_TARGET_PATH_INVALID")
     thumbnail_dat = image_dir / f"{args.stem}_t.dat"
     try:
         thumbnail_size = thumbnail_dat.stat().st_size
     except OSError:
-        fail("IMAGE_THUMBNAIL_CACHE_MISSING")
+        thumbnail_size = 0
 
     try:
         geometry = weixin_geometry()
-        selected = command(
-            "/opt/tools/chat-select", "--chat-name", args.chat_name, args.chat_id, timeout=60
-        )
-        selected_payload = json.loads(selected.stdout)
-        if not selected_payload.get("ok"):
-            raise DownloadError("CHAT_OPEN_FAILED")
-        time.sleep(1)
+        if args.thumbnail:
+            selected = command(
+                "/opt/tools/chat-select", "--chat-name", args.chat_name, args.chat_id, timeout=60
+            )
+            selected_payload = json.loads(selected.stdout)
+            if not selected_payload.get("ok"):
+                raise DownloadError("CHAT_OPEN_FAILED")
+            time.sleep(1)
         # The database gate guarantees this is the newest message. Move the
         # message view to its end, then require a unique visual identity match.
         scroll_x = round(geometry["X"] + geometry["WIDTH"] * 0.72)
@@ -250,8 +260,21 @@ def main():
         time.sleep(0.8)
         current_tree = tree()
         rows = image_rows(current_tree, geometry)
-        with Image.open(args.thumbnail) as target_image:
-            match = find_unique_match(capture(), target_image.convert("RGB"), rows)
+        screenshot = capture()
+        if args.thumbnail:
+            with Image.open(args.thumbnail) as target_image:
+                match = find_unique_match(screenshot, target_image.convert("RGB"), rows)
+        else:
+            if not rows:
+                raise DownloadError("IMAGE_CARD_NOT_FOUND")
+            row = max(rows, key=lambda value: float(value["bounds"]["y"]))
+            bounds = row["bounds"]
+            left = max(0, round(float(bounds["x"]) + 48))
+            top = max(0, round(float(bounds["y"]) + 3))
+            right = min(screenshot.width, round(float(bounds["x"]) + float(bounds["width"]) - 8))
+            bottom = min(screenshot.height, round(float(bounds["y"]) + float(bounds["height"]) - 3))
+            screenshot.crop((left, top, right, bottom)).save(args.preview_path, "JPEG", quality=92)
+            match = {"x": round((left + right) / 2), "y": round((top + bottom) / 2)}
         command("xdotool", "mousemove", str(match["x"]), str(match["y"]), "click", "1")
         try:
             path, size = wait_for_full_image(image_dir, args.stem, thumbnail_size)

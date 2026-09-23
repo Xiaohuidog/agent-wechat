@@ -191,6 +191,20 @@ pub async fn resolve_media(chat_id: &str, local_id: i64) -> MediaResult {
         get_image_keys(&db, &session.id, &logged_in_user)
     };
 
+    // A UI preview is already a readable JPEG saved by the image downloader.
+    // Return it before retrying image-key extraction, which can block on a
+    // WeChat build whose offsets are not known yet.
+    let cached_media = get_message_media(
+        &logged_in_user,
+        &keys,
+        chat_id,
+        local_id,
+        image_keys.clone(),
+    );
+    if cached_media.data.is_some() {
+        return cached_media;
+    }
+
     // The regular database keys can already be present after login while the
     // image AES key is still missing. Retry extraction before returning an
     // empty image payload so existing .dat files can be decrypted.

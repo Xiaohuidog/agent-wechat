@@ -4,5 +4,5 @@ FROM ${BASE_IMAGE}
 ARG SOURCE_SHA
 LABEL org.opencontainers.image.revision=${SOURCE_SHA}
 
-COPY video-download /opt/tools/video-download
+COPY docker/tools/video-download /opt/tools/video-download
 RUN chmod 0755 /opt/tools/video-download

@@ -15,7 +15,7 @@ use crate::ia::types::{MediaResult, Message, SendResult, SubscriptionEvent};
 use crate::plans::send_message::{SendMessageParams, SendMessagePlan};
 use crate::tools::wechat_db::{find_wechat_pid, list_account_dbs};
 use crate::tools::wechat_keys::{extract_keys_async, get_stored_keys, get_image_keys, store_keys};
-use crate::tools::wechat_media::get_message_media;
+use crate::tools::wechat_media::{get_message_file_media, get_message_media};
 use crate::tools::wechat_messages;
 use crate::sessions::manager::get_session;
 
@@ -170,6 +170,10 @@ pub async fn resolve_media(chat_id: &str, local_id: i64) -> MediaResult {
         get_stored_keys(&db, &session.id, &logged_in_user)
     };
 
+    if let Some(file_media) = get_message_file_media(&logged_in_user, &keys, chat_id, local_id) {
+        return file_media;
+    }
+
     // Lazy key extraction: if media_*.db files exist on disk without stored keys, extract them
     let on_disk = list_account_dbs(&logged_in_user);
     let has_missing_media = on_disk.iter().any(|name| {
@@ -201,13 +205,7 @@ pub async fn resolve_media(chat_id: &str, local_id: i64) -> MediaResult {
         local_id,
         image_keys.clone(),
     );
-    if cached_media.data.is_some() {
-        return cached_media;
-    }
-
-    // Images without a known AES key are recovered by the exact-message UI
-    // download operation; repeated key extraction here blocks that queue.
-    if cached_media.media_type == "image" {
+    if should_return_cached_media(&cached_media) {
         return cached_media;
     }
 
@@ -233,6 +231,10 @@ pub async fn resolve_media(chat_id: &str, local_id: i64) -> MediaResult {
         local_id,
         image_keys,
     )
+}
+
+fn should_return_cached_media(media: &MediaResult) -> bool {
+    media.data.is_some() || matches!(media.media_type.as_str(), "image" | "file")
 }
 
 pub async fn get_media(Path((chat_id, local_id)): Path<(String, i64)>) -> Json<MediaResult> {

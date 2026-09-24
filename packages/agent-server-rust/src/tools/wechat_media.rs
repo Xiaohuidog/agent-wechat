@@ -1175,11 +1175,34 @@ fn get_file_attachment(
         }
     }
 
-    // File not yet downloaded by WeChat
-    pending()
+    MediaResult {
+        media_type: "file".into(),
+        data: None,
+        url: None,
+        format: ext,
+        filename,
+    }
 }
 
 // ── Public entry point ───────────────────────────────────────────────────────
+
+/// Resolve file metadata using message DB keys before any media/image key extraction.
+pub fn get_message_file_media(
+    account_dir: &str,
+    keys: &HashMap<String, String>,
+    chat_id: &str,
+    local_id: i64,
+) -> Option<MediaResult> {
+    let (local_type, create_time, content) =
+        lookup_message_raw(account_dir, keys, chat_id, local_id)?;
+    let base = (local_type & 0xFFFFFFFF) as i32;
+    let sub = (local_type >> 32) as i32;
+    if base == 49 && sub == 6 {
+        Some(get_file_attachment(account_dir, &content, create_time, local_id))
+    } else {
+        None
+    }
+}
 
 /// Get media attachment for a message.
 pub fn get_message_media(

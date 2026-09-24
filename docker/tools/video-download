@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""Trigger one identity-matched native WeChat group-video download."""
+
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import pathlib
+import re
+import subprocess
+import sys
+import time
+
+from PIL import Image
+
+
+image_helper_path = pathlib.Path(__file__).with_name("image-download")
+loader = importlib.machinery.SourceFileLoader("image_download_helper", str(image_helper_path))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+image_helper = importlib.util.module_from_spec(spec)
+loader.exec_module(image_helper)
+
+DownloadError = image_helper.DownloadError
+
+
+def video_rows(tree, geometry):
+    top = geometry["Y"] + 70
+    bottom = geometry["Y"] + geometry["HEIGHT"] - 105
+    rows = []
+    for node in image_helper.walk(tree):
+        bounds = node.get("bounds") or {}
+        try:
+            x, y, width, height = (float(bounds[key]) for key in ("x", "y", "width", "height"))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if (
+            node.get("role") == "list-item"
+            and str(node.get("name") or "").startswith("Video")
+            and width >= 500 and height >= 100
+            and x >= geometry["X"] and y >= top and y + height <= bottom
+        ):
+            rows.append(node)
+    return rows
+
+
+def find_unique_video_match(screenshot, target, rows, threshold=0.18):
+    matches = []
+    for row in rows:
+        bounds = row.get("bounds") or {}
+        try:
+            x, y, width, height = (float(bounds[key]) for key in ("x", "y", "width", "height"))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if y < 0 or height < 100 or y + height > screenshot.height:
+            continue
+        search_row = {"bounds": {"x": x, "y": y, "width": min(width, 260), "height": height}}
+        best = image_helper._best_row_match(screenshot, target, search_row)
+        if best is not None and best[0] <= threshold:
+            score, match_x, match_y, match_width, match_height = best
+            matches.append({"score": score, "x": match_x + match_width // 2, "y": match_y + match_height // 2})
+    if not matches:
+        raise DownloadError("VIDEO_CARD_NOT_FOUND")
+    if len(matches) != 1:
+        raise DownloadError("VIDEO_IDENTITY_AMBIGUOUS")
+    return matches[0]
+
+
+def valid_video(path):
+    try:
+        size = path.stat().st_size
+        if size < 1024 or size > 100 * 1024 * 1024:
+            return None
+        with path.open("rb") as handle:
+            if handle.read(8)[4:8] != b"ftyp":
+                return None
+        probe = subprocess.run([
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=codec_name", "-of", "json", str(path),
+        ], capture_output=True, text=True, timeout=15)
+        if probe.returncode == 0 and json.loads(probe.stdout).get("streams"):
+            return size
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        pass
+    return None
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--chat-id", required=True)
+    parser.add_argument("--chat-name", required=True)
+    parser.add_argument("--local-id", required=True, type=int)
+    parser.add_argument("--video-dir", required=True)
+    parser.add_argument("--stem", required=True)
+    parser.add_argument("--thumbnail", required=True)
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    video_dir = pathlib.Path(args.video_dir)
+    if not re.fullmatch(r"/home/wechat(?:/Documents)?/xwechat_files/[^/]+/msg/video/\d{4}-\d{2}", str(video_dir)):
+        image_helper.fail("VIDEO_TARGET_PATH_INVALID")
+    if not re.fullmatch(r"[0-9a-f]{32}", args.stem):
+        image_helper.fail("VIDEO_TARGET_PATH_INVALID")
+    if not re.fullmatch(r"/tmp/agent-video-[0-9a-f-]+\.jpg", args.thumbnail):
+        image_helper.fail("VIDEO_TARGET_PATH_INVALID")
+    mp4_path = video_dir / f"{args.stem}.mp4"
+    try:
+        size = valid_video(mp4_path)
+        if size is not None:
+            print(json.dumps({"ok": True, "sizeBytes": size}))
+            return
+        geometry = image_helper.weixin_geometry()
+        if not image_helper.selected_chat(image_helper.tree(), args.chat_name):
+            response = image_helper.command(
+                "/opt/tools/chat-select", "--chat-name", args.chat_name, args.chat_id, timeout=60
+            )
+            if not json.loads(response.stdout).get("ok") or not image_helper.selected_chat(image_helper.tree(), args.chat_name):
+                raise DownloadError("VIDEO_CHAT_OPEN_FAILED")
+            time.sleep(1)
+        scroll_x = round(geometry["X"] + geometry["WIDTH"] * 0.72)
+        scroll_y = round(geometry["Y"] + geometry["HEIGHT"] * 0.5)
+        image_helper.command("xdotool", "mousemove", str(scroll_x), str(scroll_y), "click", "--repeat", "10", "--delay", "50", "5")
+        time.sleep(0.8)
+        rows = video_rows(image_helper.tree(), geometry)
+        try:
+            with Image.open(args.thumbnail) as thumbnail:
+                match = find_unique_video_match(image_helper.capture(), thumbnail.convert("RGB"), rows)
+        except (FileNotFoundError, OSError) as error:
+            raise DownloadError("VIDEO_THUMBNAIL_MISSING") from error
+        image_helper.command("xdotool", "mousemove", str(match["x"]), str(match["y"]), "click", "1")
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            size = valid_video(mp4_path)
+            if size is not None:
+                print(json.dumps({"ok": True, "sizeBytes": size}))
+                return
+            time.sleep(0.5)
+        raise DownloadError("VIDEO_DOWNLOAD_TIMEOUT")
+    except (DownloadError, json.JSONDecodeError) as error:
+        image_helper.fail(str(error) if isinstance(error, DownloadError) else "VIDEO_CHAT_RESPONSE_INVALID")
+
+
+if __name__ == "__main__":
+    main()

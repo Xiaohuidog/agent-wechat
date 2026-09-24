@@ -22,6 +22,12 @@ pub struct ImageDownloadCacheTarget {
     pub stem: String,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub struct VideoDownloadCacheTarget {
+    pub video_dir: PathBuf,
+    pub stem: String,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ImageDatVariant {
     HighResolution,
@@ -705,6 +711,42 @@ fn find_unique_video_hash_by_time(video_dir: &Path, create_time: i64) -> Option<
     candidates.into_iter().next()
 }
 
+fn video_target_for_base(base: &Path, year_month: &str, hash: &str) -> Option<VideoDownloadCacheTarget> {
+    if hash.len() != 32 || !hash.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) {
+        return None;
+    }
+    Some(VideoDownloadCacheTarget {
+        video_dir: base.join("msg/video").join(year_month),
+        stem: hash.to_string(),
+    })
+}
+
+/// Only the message-resource DB is strong enough to authorize a UI video click.
+/// The timestamp fallback used by media previews is deliberately excluded.
+pub fn get_video_download_cache_target(
+    account_dir: &str,
+    keys: &HashMap<String, String>,
+    chat_id: &str,
+    local_id: i64,
+) -> Option<VideoDownloadCacheTarget> {
+    let (local_type, create_time, _) = lookup_message_raw(account_dir, keys, chat_id, local_id)?;
+    if (local_type & 0xFFFF_FFFF) as i32 != 43 {
+        return None;
+    }
+    let hash = find_file_hash_via_resource_db(account_dir, keys, chat_id, local_id)?;
+    let year_month = chrono::DateTime::from_timestamp(create_time, 0)?.format("%Y-%m").to_string();
+    for base in account_base_paths(account_dir) {
+        let target = video_target_for_base(Path::new(&base), &year_month, &hash)?;
+        if target.video_dir.join(format!("{}_thumb.jpg", target.stem)).is_file()
+            || target.video_dir.join(format!("{}.jpg", target.stem)).is_file()
+            || target.video_dir.join(format!("{}.mp4", target.stem)).is_file()
+        {
+            return Some(target);
+        }
+    }
+    None
+}
+
 /// Resolve the exact image cache identity that a UI fetch must upgrade.
 /// Encrypted medium/high-resolution files still need a native export when the
 /// image AES key is unavailable. Ambiguous matches fail closed.
@@ -1270,7 +1312,7 @@ mod timestamp_fallback_tests {
     use super::{
         find_best_image_dat, find_unique_dat_by_time, find_unique_video_hash_by_time,
         get_saved_image_preview, image_dat_variant_path, image_download_cache_target,
-        image_filename, ImageDatVariant,
+        image_filename, video_target_for_base, ImageDatVariant,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1406,6 +1448,16 @@ mod timestamp_fallback_tests {
             find_unique_video_hash_by_time(temporary.path(), now_seconds()),
             None
         );
+    }
+
+    #[test]
+    fn video_download_target_requires_a_verified_hash() {
+        let base = Path::new("/home/wechat/xwechat_files/account");
+        let target = video_target_for_base(base, "2026-09", "dc56ab6e1f2966add09194099ade5c3c")
+            .unwrap();
+        assert_eq!(target.video_dir, base.join("msg/video/2026-09"));
+        assert_eq!(target.stem, "dc56ab6e1f2966add09194099ade5c3c");
+        assert!(video_target_for_base(base, "2026-09", "../wrong").is_none());
     }
 
     #[test]

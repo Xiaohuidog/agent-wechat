@@ -18,6 +18,11 @@ jobs:
       - name: Verify timed-out image helper exits on Linux
         run: cargo test --manifest-path packages/agent-server-rust/Cargo.toml timed_out_command_does_not_leave_a_child_running
 
+      - name: Verify exact group-video download identity on Linux
+        run: |
+          cargo test --manifest-path packages/agent-server-rust/Cargo.toml video_download_target_requires_a_verified_hash
+          cargo test --manifest-path packages/agent-server-rust/Cargo.toml video_operation_only_accepts_group_message_identity
+
       - name: Prepare Docker context
         run: |
           rm -rf docker/agent-server-rust

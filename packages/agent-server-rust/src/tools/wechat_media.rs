@@ -1493,3 +1493,23 @@ mod timestamp_fallback_tests {
         assert_eq!(media.data.as_deref(), Some("bmF0aXZlLWpwZWc="));
     }
 }
+
+#[cfg(test)]
+mod file_media_tests {
+    use super::get_file_attachment;
+
+    #[test]
+    fn undownloaded_file_retains_kind_and_filename_for_direct_download() {
+        let media = get_file_attachment(
+            "nonexistent-file-media-test-account",
+            "<msg><appmsg><title>项目说明.pdf</title><fileext>pdf</fileext></appmsg></msg>",
+            1_779_000_000,
+            45,
+        );
+
+        assert_eq!(media.media_type, "file");
+        assert_eq!(media.filename, "项目说明.pdf");
+        assert_eq!(media.format, "pdf");
+        assert!(media.data.is_none());
+    }
+}

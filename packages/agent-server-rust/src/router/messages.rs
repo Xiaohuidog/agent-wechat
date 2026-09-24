@@ -239,6 +239,25 @@ pub async fn get_media(Path((chat_id, local_id)): Path<(String, i64)>) -> Json<M
     Json(resolve_media(&chat_id, local_id).await)
 }
 
+#[cfg(test)]
+mod file_media_tests {
+    use super::should_return_cached_media;
+    use crate::ia::types::MediaResult;
+
+    #[test]
+    fn pending_file_skips_unrelated_image_key_extraction() {
+        let file = MediaResult {
+            media_type: "file".into(),
+            data: None,
+            url: None,
+            format: "pdf".into(),
+            filename: "项目说明.pdf".into(),
+        };
+
+        assert!(should_return_cached_media(&file));
+    }
+}
+
 #[derive(Deserialize)]
 pub struct SendParams {
     #[serde(rename = "chatId")]

@@ -112,10 +112,8 @@ def main():
             return
         geometry = image_helper.weixin_geometry()
         if not image_helper.selected_chat(image_helper.tree(), args.chat_name):
-            response = image_helper.command(
-                "/opt/tools/chat-select", "--chat-name", args.chat_name, args.chat_id, timeout=60
-            )
-            if not json.loads(response.stdout).get("ok") or not image_helper.selected_chat(image_helper.tree(), args.chat_name):
+            image_helper.select_chat(args.chat_name)
+            if not image_helper.selected_chat(image_helper.tree(), args.chat_name):
                 raise DownloadError("VIDEO_CHAT_OPEN_FAILED")
             time.sleep(1)
         scroll_x = round(geometry["X"] + geometry["WIDTH"] * 0.72)

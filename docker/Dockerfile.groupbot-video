@@ -1,0 +1,8 @@
+ARG BASE_IMAGE=agent-wechat:groupbot-video-e5d0e892
+FROM ${BASE_IMAGE}
+
+ARG SOURCE_SHA
+LABEL org.opencontainers.image.revision=${SOURCE_SHA}
+
+COPY video-download /opt/tools/video-download
+RUN chmod 0755 /opt/tools/video-download

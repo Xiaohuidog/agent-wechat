@@ -5,4 +5,5 @@ ARG SOURCE_SHA
 LABEL org.opencontainers.image.revision=${SOURCE_SHA}
 
 COPY agent-server /opt/agent-server/agent-server
-RUN chmod 0755 /opt/agent-server/agent-server
+COPY docker/tools/file-download /opt/tools/file-download
+RUN chmod 0755 /opt/agent-server/agent-server /opt/tools/file-download

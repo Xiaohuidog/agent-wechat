@@ -2,6 +2,7 @@
 """Serial, fail-closed WeChat file save helper used by the agent API."""
 
 import argparse
+from datetime import datetime
 import json
 import os
 import pwd
@@ -129,9 +130,17 @@ def select_chat(chat_name):
     raise DownloadError("CHAT_UI_OPEN_UNCONFIRMED")
 
 
-def matching_rows(value, filename):
+def matching_rows(value, filename, sent_at=None):
     rows = []
-    for node in walk(value):
+    message_lists = [node for node in walk(value)
+                     if node.get("role") == "list" and node.get("name") == "Messages"]
+    nodes = (message_lists[0].get("children") or []) if message_lists else list(walk(value))
+    expected_time = datetime.fromisoformat(sent_at.replace("Z", "+00:00")).strftime("%H:%M") if sent_at else None
+    visible_time = None
+    for node in nodes:
+        if node.get("role") == "list-item" and re.fullmatch(r"\d{1,2}:\d{2}", str(node.get("name"))):
+            visible_time = node["name"]
+            continue
         bounds = node.get("bounds") or {}
         name = node.get("name")
         if (
@@ -140,6 +149,7 @@ def matching_rows(value, filename):
             and name.startswith("File\n")
             and filename in name.splitlines()
             and float(bounds.get("width", 0)) >= 500
+            and (expected_time is None or visible_time == expected_time)
         ):
             rows.append(node)
     if len(rows) > 1:
@@ -188,13 +198,13 @@ def scroll(geometry, button, repeat=4):
     time.sleep(0.6)
 
 
-def find_row(filename, geometry, timeout_seconds=240):
+def find_row(filename, geometry, timeout_seconds=240, sent_at=None):
     safe_top = geometry["Y"] + 80
     safe_bottom = geometry["Y"] + geometry["HEIGHT"] - 120
     deadline = time.monotonic() + timeout_seconds
 
     for _ in range(3):
-        rows = matching_rows(tree(), filename)
+        rows = matching_rows(tree(), filename, sent_at)
         if not rows:
             break
         bounds = rows[0]["bounds"]
@@ -213,7 +223,7 @@ def find_row(filename, geometry, timeout_seconds=240):
     repeated = 0
     while time.monotonic() < deadline:
         current = tree()
-        rows = matching_rows(current, filename)
+        rows = matching_rows(current, filename, sent_at)
         if rows:
             bounds = rows[0]["bounds"]
             top = float(bounds["y"])
@@ -261,6 +271,7 @@ def parse_args():
     parser.add_argument("--chat-name", required=True)
     parser.add_argument("--local-id", required=True, type=int)
     parser.add_argument("--filename", required=True)
+    parser.add_argument("--sent-at")
     parser.add_argument("--output", required=True)
     return parser.parse_args()
 
@@ -299,7 +310,7 @@ def main():
         geometry = weixin_geometry()
         select_chat(args.chat_name)
         time.sleep(1)
-        row = find_row(args.filename, geometry)
+        row = find_row(args.filename, geometry, sent_at=args.sent_at)
         bounds = row["bounds"]
         x = round(float(bounds["x"]) + min(227, float(bounds["width"]) / 4))
         y = center(bounds)[1]

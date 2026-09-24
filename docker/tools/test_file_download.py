@@ -16,6 +16,25 @@ LOADER.exec_module(file_download)
 
 
 class WeixinGeometryTest(unittest.TestCase):
+    def test_duplicate_filename_uses_message_minute(self):
+        old = {"role": "list-item", "name": "File\n报告.pdf\n12K\n微信电脑版", "bounds": {"x": 423, "y": 116, "width": 704, "height": 120}}
+        new = {**old, "bounds": {"x": 423, "y": 400, "width": 704, "height": 120}}
+        snapshot = {"role": "list", "name": "Messages", "children": [
+            {"role": "list-item", "name": "10:09"}, old,
+            {"role": "list-item", "name": "13:45"}, new,
+        ]}
+        self.assertEqual(file_download.matching_rows(snapshot, "报告.pdf", "2026-09-24T13:45:23+00:00"), [new])
+
+    def test_duplicate_filename_same_minute_fails_closed(self):
+        row = {"role": "list-item", "name": "File\n报告.pdf\n12K\n微信电脑版", "bounds": {"x": 423, "y": 116, "width": 704, "height": 120}}
+        snapshot = {"role": "list", "name": "Messages", "children": [
+            {"role": "list-item", "name": "13:45"}, row,
+            {"role": "list-item", "name": "13:45"}, {**row, "bounds": {"x": 423, "y": 400, "width": 704, "height": 120}},
+        ]}
+        with self.assertRaises(file_download.DownloadError) as error:
+            file_download.matching_rows(snapshot, "报告.pdf", "2026-09-24T13:45:23+00:00")
+        self.assertEqual(str(error.exception), "FILE_IDENTITY_AMBIGUOUS")
+
     def test_uses_largest_visible_weixin_window(self):
         geometries = {
             "2": "X=359\nY=179\nWIDTH=560\nHEIGHT=440\n",
@@ -106,7 +125,7 @@ class FileChatSelectionTest(unittest.TestCase):
     def test_file_download_main_uses_file_scoped_chat_selection(self):
         args = SimpleNamespace(
             chat_id="53250352594@chatroom", chat_name="群测试", local_id=46,
-            filename="报告.pdf",
+            filename="报告.pdf", sent_at="2026-09-24T10:09:04+00:00",
             output="/home/wechat/Downloads/agent-file-a59f5940-4528-4214-812e-b39213bbd7f0.pdf",
         )
         output = io.StringIO()

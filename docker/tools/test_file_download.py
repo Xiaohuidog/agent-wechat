@@ -1,5 +1,6 @@
 import importlib.machinery
 import importlib.util
+import io
 import pathlib
 import unittest
 from types import SimpleNamespace
@@ -54,6 +55,76 @@ class WeixinGeometryTest(unittest.TestCase):
             )
 
         self.assertEqual(row, target)
+
+
+class FileChatSelectionTest(unittest.TestCase):
+    def test_selects_live_one_line_chat_card_and_confirms_group_header(self):
+        card = {
+            "role": "list-item",
+            "name": "群测试 8 unread message(s) 小晖Allen: [File] 报告.pdf 10:09",
+            "bounds": {"x": 212, "y": 182, "width": 210, "height": 68},
+        }
+        initial = {"role": "list", "name": "Chats", "children": [card]}
+        opened = {
+            "children": [
+                {"role": "list", "name": "Chats", "children": [{**card, "states": ["SELECTED"]}]},
+                {"role": "label", "name": "群测试"},
+                {"role": "list", "name": "Messages"},
+            ]
+        }
+        commands = []
+
+        def command(*args, **_kwargs):
+            commands.append(args)
+            return SimpleNamespace(stdout="", returncode=0)
+
+        with (
+            mock.patch.object(file_download, "tree", side_effect=[initial, opened]),
+            mock.patch.object(file_download, "command", side_effect=command),
+            mock.patch.object(file_download.time, "sleep"),
+        ):
+            file_download.select_chat("群测试")
+
+        self.assertEqual(commands, [("xdotool", "mousemove", "317", "216", "click", "1")])
+
+    def test_similar_group_card_does_not_count_as_selected_group(self):
+        wrong_group = {
+            "children": [
+                {"role": "list", "name": "Chats", "children": [
+                    {"role": "list-item", "name": "群测试备份 小晖Allen: [File] 报告.pdf 10:09",
+                     "bounds": {"x": 212, "y": 182, "width": 210, "height": 68}},
+                ]},
+            ]
+        }
+        with mock.patch.object(file_download, "tree", return_value=wrong_group):
+            with self.assertRaises(file_download.DownloadError) as error:
+                file_download.select_chat("群测试")
+
+        self.assertEqual(str(error.exception), "CHAT_SEARCH_UNAVAILABLE")
+
+    def test_file_download_main_uses_file_scoped_chat_selection(self):
+        args = SimpleNamespace(
+            chat_id="53250352594@chatroom", chat_name="群测试", local_id=46,
+            filename="报告.pdf",
+            output="/home/wechat/Downloads/agent-file-a59f5940-4528-4214-812e-b39213bbd7f0.pdf",
+        )
+        output = io.StringIO()
+        with (
+            mock.patch.object(file_download, "parse_args", return_value=args),
+            mock.patch.object(file_download, "weixin_geometry", return_value={}),
+            mock.patch.object(file_download, "select_chat",
+                              side_effect=file_download.DownloadError("CHAT_TEST_SENTINEL"),
+                              create=True),
+            mock.patch.object(file_download, "command",
+                              side_effect=AssertionError("global chat-select must not run")),
+            mock.patch.object(file_download.os, "makedirs"),
+            mock.patch.object(file_download.os, "unlink"),
+            mock.patch("sys.stdout", output),
+            self.assertRaises(SystemExit),
+        ):
+            file_download.main()
+
+        self.assertIn('"errorCode": "CHAT_TEST_SENTINEL"', output.getvalue())
 
 
 if __name__ == "__main__":

@@ -71,6 +71,63 @@ def named_node(value, role, names):
     raise DownloadError(f"{role.upper().replace('-', '_')}_NOT_FOUND")
 
 
+def chat_is_open(value, chat_name):
+    return any(
+        node.get("role") == "label" and node.get("name") == chat_name
+        for node in walk(value)
+    ) and any(
+        node.get("role") == "list" and node.get("name") == "Messages"
+        for node in walk(value)
+    )
+
+
+def chat_cards(value, chat_name):
+    cards = []
+    for chat_list in walk(value):
+        if chat_list.get("role") != "list" or chat_list.get("name") != "Chats":
+            continue
+        for node in walk(chat_list.get("children") or []):
+            name = node.get("name")
+            if node.get("role") != "list-item" or not isinstance(name, str) or not node.get("bounds"):
+                continue
+            suffix = name[len(chat_name):] if name.startswith(chat_name) else ""
+            if (name == chat_name or suffix.startswith("\n")
+                    or re.match(r"^(?: \d+ unread message\(s\))? [^\s:]+: ", suffix)):
+                cards.append(node)
+    return cards
+
+
+def select_chat(chat_name):
+    current = tree()
+    if chat_is_open(current, chat_name):
+        return
+    cards = chat_cards(current, chat_name)
+    if not cards:
+        search = next((node for node in walk(current)
+                       if node.get("role") == "text" and node.get("name") == "Search"
+                       and node.get("bounds")), None)
+        if search is None:
+            raise DownloadError("CHAT_SEARCH_UNAVAILABLE")
+        command("xdotool", "mousemove", *map(str, center(search["bounds"])), "click", "1")
+        command("xdotool", "key", "--clearmodifiers", "ctrl+a")
+        command("/opt/tools/input", chat_name)
+        for _ in range(25):
+            time.sleep(0.4)
+            cards = chat_cards(tree(), chat_name)
+            if cards:
+                break
+    if not cards:
+        raise DownloadError("CHAT_UI_NOT_FOUND")
+    if len(cards) != 1:
+        raise DownloadError("CHAT_UI_AMBIGUOUS")
+    command("xdotool", "mousemove", *map(str, center(cards[0]["bounds"])), "click", "1")
+    for _ in range(30):
+        time.sleep(0.4)
+        if chat_is_open(tree(), chat_name):
+            return
+    raise DownloadError("CHAT_UI_OPEN_UNCONFIRMED")
+
+
 def matching_rows(value, filename):
     rows = []
     for node in walk(value):
@@ -224,19 +281,7 @@ def main():
 
     try:
         geometry = weixin_geometry()
-        selected = command(
-            "/opt/tools/chat-select",
-            "--chat-name",
-            args.chat_name,
-            args.chat_id,
-            timeout=60,
-        )
-        try:
-            selected_result = json.loads(selected.stdout)
-        except json.JSONDecodeError as error:
-            raise DownloadError("CHAT_OPEN_RESPONSE_INVALID") from error
-        if not selected_result.get("ok"):
-            raise DownloadError("CHAT_OPEN_FAILED")
+        select_chat(args.chat_name)
         time.sleep(1)
         row = find_row(args.filename, geometry)
         bounds = row["bounds"]

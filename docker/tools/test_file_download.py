@@ -2,6 +2,7 @@ import importlib.machinery
 import importlib.util
 import io
 import pathlib
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -112,6 +113,7 @@ class FileChatSelectionTest(unittest.TestCase):
         with (
             mock.patch.object(file_download, "parse_args", return_value=args),
             mock.patch.object(file_download, "weixin_geometry", return_value={}),
+            mock.patch.object(file_download, "prepare_download_dir"),
             mock.patch.object(file_download, "select_chat",
                               side_effect=file_download.DownloadError("CHAT_TEST_SENTINEL"),
                               create=True),
@@ -125,6 +127,22 @@ class FileChatSelectionTest(unittest.TestCase):
             file_download.main()
 
         self.assertIn('"errorCode": "CHAT_TEST_SENTINEL"', output.getvalue())
+
+
+class DownloadDirectoryTest(unittest.TestCase):
+    def test_download_directory_is_owned_by_wechat_before_saving(self):
+        with tempfile.TemporaryDirectory() as root:
+            directory = pathlib.Path(root) / "home" / "wechat" / "Downloads"
+            output = directory / "agent-file-a59f5940-4528-4214-812e-b39213bbd7f0.pdf"
+            with mock.patch.object(file_download.os, "chown") as chown, \
+                 mock.patch("pwd.getpwnam", return_value=SimpleNamespace(
+                     pw_uid=1000, pw_gid=1000,
+                 )):
+                file_download.prepare_download_dir(str(output))
+
+            self.assertTrue(directory.is_dir())
+            self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+            chown.assert_called_once_with(str(directory), 1000, 1000)
 
 
 if __name__ == "__main__":

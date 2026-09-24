@@ -4,6 +4,7 @@
 import argparse
 import json
 import os
+import pwd
 import re
 import subprocess
 import sys
@@ -264,6 +265,23 @@ def parse_args():
     return parser.parse_args()
 
 
+def prepare_download_dir(output_path):
+    download_dir = os.path.dirname(output_path)
+    username = os.path.basename(os.path.dirname(download_dir))
+    try:
+        owner = pwd.getpwnam(username)
+    except KeyError as error:
+        raise DownloadError("FILE_DOWNLOAD_USER_INVALID") from error
+    try:
+        os.makedirs(download_dir, mode=0o700, exist_ok=True)
+        if os.path.islink(download_dir) or not os.path.isdir(download_dir):
+            raise DownloadError("FILE_DOWNLOAD_DIR_INVALID")
+        os.chown(download_dir, owner.pw_uid, owner.pw_gid)
+        os.chmod(download_dir, 0o700)
+    except OSError as error:
+        raise DownloadError("FILE_DOWNLOAD_DIR_UNAVAILABLE") from error
+
+
 def main():
     args = parse_args()
     output_pattern = re.compile(
@@ -272,14 +290,12 @@ def main():
     )
     if output_pattern.fullmatch(args.output) is None:
         fail("FILE_DOWNLOAD_OUTPUT_PATH_INVALID")
-    download_dir = os.path.dirname(args.output)
-    os.makedirs(download_dir, mode=0o700, exist_ok=True)
     try:
-        os.unlink(args.output)
-    except FileNotFoundError:
-        pass
-
-    try:
+        prepare_download_dir(args.output)
+        try:
+            os.unlink(args.output)
+        except FileNotFoundError:
+            pass
         geometry = weixin_geometry()
         select_chat(args.chat_name)
         time.sleep(1)

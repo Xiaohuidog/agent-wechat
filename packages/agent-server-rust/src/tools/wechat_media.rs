@@ -1141,37 +1141,91 @@ fn get_voice_data(
 
 // ── File attachment ──────────────────────────────────────────────────────────
 
+fn read_file_attachment_from_month(
+    month_dir: &Path,
+    filename: &str,
+    expected_size: Option<u64>,
+    expected_md5: Option<&str>,
+) -> Option<Vec<u8>> {
+    let named_path = month_dir.join(filename);
+    if named_path.is_file() {
+        return fs::read(named_path).ok();
+    }
+
+    let size = expected_size?;
+    let md5 = expected_md5?.to_ascii_lowercase();
+    if md5.len() != 32 || !md5.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+
+    for entry in fs::read_dir(month_dir).ok()?.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if metadata.len() != size {
+            continue;
+        }
+        let Ok(data) = fs::read(entry.path()) else {
+            continue;
+        };
+        if format!("{:x}", Md5::digest(&data)) == md5 {
+            return Some(data);
+        }
+    }
+    None
+}
+
 fn get_file_attachment(
     account_dir: &str,
     content: &str,
     create_time: i64,
     local_id: i64,
 ) -> MediaResult {
+    let bases = account_base_paths(account_dir).map(PathBuf::from);
+    get_file_attachment_from_bases(&bases, content, create_time, local_id)
+}
+
+fn get_file_attachment_from_bases(
+    bases: &[PathBuf],
+    content: &str,
+    create_time: i64,
+    local_id: i64,
+) -> MediaResult {
     let filename = extract_xml_tag(content, "title").unwrap_or_else(|| format!("file_{local_id}"));
     let ext = extract_xml_tag(content, "fileext").unwrap_or_default();
+    let expected_size = extract_xml_tag(content, "totallen").and_then(|value| value.parse().ok());
+    let expected_md5 = extract_xml_tag(content, "md5");
 
-    // Files are stored at <account>/msg/file/YYYY-MM/<filename>
+    // WeChat may rename cached files inside msg/file/YYYY-MM; match by message identity.
     let dt = chrono::DateTime::from_timestamp(create_time, 0);
-    let year_month = dt.map(|d| d.format("%Y-%m").to_string()).unwrap_or_default();
+    let year_month = dt
+        .map(|d| d.format("%Y-%m").to_string())
+        .unwrap_or_default();
 
-    for base in &account_base_paths(account_dir) {
-        let file_path = Path::new(base)
-            .join("msg/file")
-            .join(&year_month)
-            .join(&filename);
-        if file_path.exists() {
-            if let Ok(data) = fs::read(&file_path) {
-                return MediaResult {
-                    media_type: "file".into(),
-                    data: Some(base64::Engine::encode(
-                        &base64::engine::general_purpose::STANDARD,
-                        &data,
-                    )),
-                    url: None,
-                    format: ext,
-                    filename,
-                };
-            }
+    for base in bases {
+        let month_dir = base.join("msg/file").join(&year_month);
+        if let Some(data) = read_file_attachment_from_month(
+            &month_dir,
+            &filename,
+            expected_size,
+            expected_md5.as_deref(),
+        ) {
+            return MediaResult {
+                media_type: "file".into(),
+                data: Some(base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &data,
+                )),
+                url: None,
+                format: ext,
+                filename,
+            };
         }
     }
 
@@ -1519,7 +1573,10 @@ mod timestamp_fallback_tests {
 
 #[cfg(test)]
 mod file_media_tests {
-    use super::get_file_attachment;
+    use super::{
+        get_file_attachment, get_file_attachment_from_bases, read_file_attachment_from_month,
+    };
+    use std::fs;
 
     #[test]
     fn undownloaded_file_retains_kind_and_filename_for_direct_download() {
@@ -1534,5 +1591,55 @@ mod file_media_tests {
         assert_eq!(media.filename, "项目说明.pdf");
         assert_eq!(media.format, "pdf");
         assert!(media.data.is_none());
+    }
+
+    #[test]
+    fn renamed_wechat_cache_file_is_found_by_message_size_and_md5() {
+        let root = tempfile::tempdir().unwrap();
+        let expected = b"%PDF-1.4\nfixture";
+        fs::write(root.path().join("2026-09(8)"), b"%PDF-1.4\nWRONGxx").unwrap();
+        fs::write(root.path().join("2026-09(9)"), expected).unwrap();
+
+        let bytes = read_file_attachment_from_month(
+            root.path(),
+            "《创始人行动手册》.pdf",
+            Some(16),
+            Some("6ecdbd413b9974b15a85c9e1a503d2bd"),
+        );
+
+        assert_eq!(bytes.as_deref(), Some(expected.as_slice()));
+    }
+
+    #[test]
+    fn renamed_cache_file_without_message_md5_is_not_guessed() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("2026-09(9)"), b"%PDF-1.4\nfixture").unwrap();
+
+        assert!(read_file_attachment_from_month(
+            root.path(),
+            "《创始人行动手册》.pdf",
+            Some(16),
+            None,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn file_message_xml_resolves_renamed_cached_pdf() {
+        let root = tempfile::tempdir().unwrap();
+        let month = root.path().join("msg/file/2026-09");
+        fs::create_dir_all(&month).unwrap();
+        fs::write(month.join("2026-09(9)"), b"%PDF-1.4\nfixture").unwrap();
+        let xml = "<msg><appmsg><title>《创始人行动手册》.pdf</title>\
+            <appattach><totallen>16</totallen><md5>6ecdbd413b9974b15a85c9e1a503d2bd</md5>\
+            <fileext>pdf</fileext></appattach></appmsg></msg>";
+
+        let media =
+            get_file_attachment_from_bases(&[root.path().to_path_buf()], xml, 1_790_271_079, 64);
+
+        assert_eq!(media.media_type, "file");
+        assert_eq!(media.filename, "《创始人行动手册》.pdf");
+        assert_eq!(media.format, "pdf");
+        assert_eq!(media.data.as_deref(), Some("JVBERi0xLjQKZml4dHVyZQ=="));
     }
 }

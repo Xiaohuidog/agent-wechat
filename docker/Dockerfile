@@ -33,6 +33,9 @@ RUN mkdir -p /output && cp target/${BUILD_MODE}/agent-server /output/agent-serve
 # ============================================
 FROM ubuntu:22.04
 
+ARG SOURCE_SHA=unknown
+LABEL org.opencontainers.image.revision=${SOURCE_SHA}
+
 ENV DEBIAN_FRONTEND=noninteractive
 
 # ============================================

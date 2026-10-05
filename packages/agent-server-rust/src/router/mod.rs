@@ -6,6 +6,7 @@ mod events;
 mod finder;
 mod file_downloads;
 mod image_downloads;
+mod video_downloads;
 mod messages;
 mod sessions;
 mod status;
@@ -71,6 +72,8 @@ pub fn build_router() -> Router {
         // Reliable image downloads
         .route("/api/image-downloads", post(image_downloads::create))
         .route("/api/image-downloads/{id}", get(image_downloads::get))
+        .route("/api/video-downloads", post(video_downloads::create))
+        .route("/api/video-downloads/{id}", get(video_downloads::get))
         // Debug
         .route("/api/debug/screenshot", get(debug::screenshot))
         .route("/api/debug/a11y", get(debug::a11y))

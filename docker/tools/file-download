@@ -2,8 +2,10 @@
 """Serial, fail-closed WeChat file save helper used by the agent API."""
 
 import argparse
+from datetime import datetime
 import json
 import os
+import pwd
 import re
 import subprocess
 import sys
@@ -71,9 +73,74 @@ def named_node(value, role, names):
     raise DownloadError(f"{role.upper().replace('-', '_')}_NOT_FOUND")
 
 
-def matching_rows(value, filename):
+def chat_is_open(value, chat_name):
+    return any(
+        node.get("role") == "label" and node.get("name") == chat_name
+        for node in walk(value)
+    ) and any(
+        node.get("role") == "list" and node.get("name") == "Messages"
+        for node in walk(value)
+    )
+
+
+def chat_cards(value, chat_name):
+    cards = []
+    for chat_list in walk(value):
+        if chat_list.get("role") != "list" or chat_list.get("name") != "Chats":
+            continue
+        for node in walk(chat_list.get("children") or []):
+            name = node.get("name")
+            if node.get("role") != "list-item" or not isinstance(name, str) or not node.get("bounds"):
+                continue
+            suffix = name[len(chat_name):] if name.startswith(chat_name) else ""
+            if (name == chat_name or suffix.startswith("\n")
+                    or re.match(r"^(?: \d+ unread message\(s\))? [^\s:]+: ", suffix)):
+                cards.append(node)
+    return cards
+
+
+def select_chat(chat_name):
+    current = tree()
+    if chat_is_open(current, chat_name):
+        return
+    cards = chat_cards(current, chat_name)
+    if not cards:
+        search = next((node for node in walk(current)
+                       if node.get("role") == "text" and node.get("name") == "Search"
+                       and node.get("bounds")), None)
+        if search is None:
+            raise DownloadError("CHAT_SEARCH_UNAVAILABLE")
+        command("xdotool", "mousemove", *map(str, center(search["bounds"])), "click", "1")
+        command("xdotool", "key", "--clearmodifiers", "ctrl+a")
+        command("/opt/tools/input", chat_name)
+        for _ in range(25):
+            time.sleep(0.4)
+            cards = chat_cards(tree(), chat_name)
+            if cards:
+                break
+    if not cards:
+        raise DownloadError("CHAT_UI_NOT_FOUND")
+    if len(cards) != 1:
+        raise DownloadError("CHAT_UI_AMBIGUOUS")
+    command("xdotool", "mousemove", *map(str, center(cards[0]["bounds"])), "click", "1")
+    for _ in range(30):
+        time.sleep(0.4)
+        if chat_is_open(tree(), chat_name):
+            return
+    raise DownloadError("CHAT_UI_OPEN_UNCONFIRMED")
+
+
+def matching_rows(value, filename, sent_at=None):
     rows = []
-    for node in walk(value):
+    message_lists = [node for node in walk(value)
+                     if node.get("role") == "list" and node.get("name") == "Messages"]
+    nodes = (message_lists[0].get("children") or []) if message_lists else list(walk(value))
+    expected_time = datetime.fromisoformat(sent_at.replace("Z", "+00:00")).strftime("%H:%M") if sent_at else None
+    visible_time = None
+    for node in nodes:
+        if node.get("role") == "list-item" and re.fullmatch(r"\d{1,2}:\d{2}", str(node.get("name"))):
+            visible_time = node["name"]
+            continue
         bounds = node.get("bounds") or {}
         name = node.get("name")
         if (
@@ -82,6 +149,7 @@ def matching_rows(value, filename):
             and name.startswith("File\n")
             and filename in name.splitlines()
             and float(bounds.get("width", 0)) >= 500
+            and (expected_time is None or visible_time == expected_time)
         ):
             rows.append(node)
     if len(rows) > 1:
@@ -130,13 +198,13 @@ def scroll(geometry, button, repeat=4):
     time.sleep(0.6)
 
 
-def find_row(filename, geometry, timeout_seconds=240):
+def find_row(filename, geometry, timeout_seconds=240, sent_at=None):
     safe_top = geometry["Y"] + 80
     safe_bottom = geometry["Y"] + geometry["HEIGHT"] - 120
     deadline = time.monotonic() + timeout_seconds
 
     for _ in range(3):
-        rows = matching_rows(tree(), filename)
+        rows = matching_rows(tree(), filename, sent_at)
         if not rows:
             break
         bounds = rows[0]["bounds"]
@@ -155,7 +223,7 @@ def find_row(filename, geometry, timeout_seconds=240):
     repeated = 0
     while time.monotonic() < deadline:
         current = tree()
-        rows = matching_rows(current, filename)
+        rows = matching_rows(current, filename, sent_at)
         if rows:
             bounds = rows[0]["bounds"]
             top = float(bounds["y"])
@@ -203,8 +271,26 @@ def parse_args():
     parser.add_argument("--chat-name", required=True)
     parser.add_argument("--local-id", required=True, type=int)
     parser.add_argument("--filename", required=True)
+    parser.add_argument("--sent-at")
     parser.add_argument("--output", required=True)
     return parser.parse_args()
+
+
+def prepare_download_dir(output_path):
+    download_dir = os.path.dirname(output_path)
+    username = os.path.basename(os.path.dirname(download_dir))
+    try:
+        owner = pwd.getpwnam(username)
+    except KeyError as error:
+        raise DownloadError("FILE_DOWNLOAD_USER_INVALID") from error
+    try:
+        os.makedirs(download_dir, mode=0o700, exist_ok=True)
+        if os.path.islink(download_dir) or not os.path.isdir(download_dir):
+            raise DownloadError("FILE_DOWNLOAD_DIR_INVALID")
+        os.chown(download_dir, owner.pw_uid, owner.pw_gid)
+        os.chmod(download_dir, 0o700)
+    except OSError as error:
+        raise DownloadError("FILE_DOWNLOAD_DIR_UNAVAILABLE") from error
 
 
 def main():
@@ -215,30 +301,16 @@ def main():
     )
     if output_pattern.fullmatch(args.output) is None:
         fail("FILE_DOWNLOAD_OUTPUT_PATH_INVALID")
-    download_dir = os.path.dirname(args.output)
-    os.makedirs(download_dir, mode=0o700, exist_ok=True)
     try:
-        os.unlink(args.output)
-    except FileNotFoundError:
-        pass
-
-    try:
-        geometry = weixin_geometry()
-        selected = command(
-            "/opt/tools/chat-select",
-            "--chat-name",
-            args.chat_name,
-            args.chat_id,
-            timeout=60,
-        )
+        prepare_download_dir(args.output)
         try:
-            selected_result = json.loads(selected.stdout)
-        except json.JSONDecodeError as error:
-            raise DownloadError("CHAT_OPEN_RESPONSE_INVALID") from error
-        if not selected_result.get("ok"):
-            raise DownloadError("CHAT_OPEN_FAILED")
+            os.unlink(args.output)
+        except FileNotFoundError:
+            pass
+        geometry = weixin_geometry()
+        select_chat(args.chat_name)
         time.sleep(1)
-        row = find_row(args.filename, geometry)
+        row = find_row(args.filename, geometry, sent_at=args.sent_at)
         bounds = row["bounds"]
         x = round(float(bounds["x"]) + min(227, float(bounds["width"]) / 4))
         y = center(bounds)[1]

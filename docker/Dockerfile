@@ -1,7 +1,7 @@
 # ============================================
 # Stage 1: Build the Rust server binary
 # ============================================
-FROM rust:1.93-bookworm AS builder
+FROM rust:1.93-bullseye@sha256:fae8ebcb8eda28d37df2b965c87c15a572dac2b6d3893a72d6dea99d700d1786 AS builder
 
 ARG BUILD_MODE=release
 
@@ -32,6 +32,9 @@ RUN mkdir -p /output && cp target/${BUILD_MODE}/agent-server /output/agent-serve
 # Stage 2: Final runtime image
 # ============================================
 FROM ubuntu:22.04
+
+ARG SOURCE_SHA=unknown
+LABEL org.opencontainers.image.revision=${SOURCE_SHA}
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -107,13 +110,14 @@ RUN mkdir -p /tmp/.X11-unix && chown root:root /tmp/.X11-unix && chmod 1777 /tmp
 # Run `pnpm download:wechat` to cache locally for faster builds.
 # ============================================
 ARG TARGETARCH
-COPY wechat.de[b] /tmp/
-RUN if [ -f /tmp/wechat.deb ]; then \
+RUN --mount=type=bind,source=.,target=/build-context,readonly \
+    if [ -f /build-context/wechat.deb ]; then \
       echo "Installing WeChat from local .deb"; \
+      cp /build-context/wechat.deb /tmp/wechat.deb; \
     else \
       ARCH_SUFFIX=$([ "$TARGETARCH" = "arm64" ] && echo "arm64" || echo "x86_64") \
       && echo "Downloading WeChat for ${ARCH_SUFFIX}..." \
-      && curl -L -o /tmp/wechat.deb "https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_${ARCH_SUFFIX}.deb"; \
+      && curl --fail --location --retry 3 -o /tmp/wechat.deb "https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_${ARCH_SUFFIX}.deb"; \
     fi \
     && (dpkg -i /tmp/wechat.deb || (apt-get update && apt-get install -y -f)) \
     && rm -rf /var/lib/apt/lists/* /tmp/wechat.deb

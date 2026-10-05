@@ -1,5 +1,11 @@
 # @agent-wechat/agent-server
 
+## 0.14.0
+
+### Minor Changes
+
+- Integrate the production image, video, and file collection paths into one source build while retaining the fixes released in 0.13.2.
+
 ## 0.13.2
 
 ### Patch Changes

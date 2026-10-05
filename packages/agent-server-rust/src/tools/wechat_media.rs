@@ -22,6 +22,12 @@ pub struct ImageDownloadCacheTarget {
     pub stem: String,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub struct VideoDownloadCacheTarget {
+    pub video_dir: PathBuf,
+    pub stem: String,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ImageDatVariant {
     HighResolution,
@@ -91,10 +97,7 @@ fn image_dat_variant_path(dat_path: &Path, variant: ImageDatVariant) -> Option<P
 
 fn image_download_cache_target(dat_path: &Path) -> Option<(PathBuf, String)> {
     let name = dat_path.file_name()?.to_str()?;
-    let (stem, variant) = parse_image_dat_name(name)?;
-    if variant != ImageDatVariant::Thumbnail {
-        return None;
-    }
+    let (stem, _) = parse_image_dat_name(name)?;
     Some((dat_path.parent()?.to_path_buf(), stem.to_string()))
 }
 
@@ -235,6 +238,23 @@ fn get_image_thumbnail(
         }
     }
     None
+}
+
+fn get_saved_image_preview(dat_path: &str, local_id: i64) -> Option<MediaResult> {
+    let path = Path::new(dat_path);
+    let (stem, _) = parse_image_dat_name(path.file_name()?.to_str()?)?;
+    let preview_path = path.parent()?.join(format!("{stem}_preview.jpg"));
+    let data = fs::read(preview_path).ok()?;
+    Some(MediaResult {
+        media_type: "image".into(),
+        data: Some(base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            data,
+        )),
+        url: None,
+        format: "jpeg".into(),
+        filename: image_filename(local_id, "jpg", false),
+    })
 }
 
 // ── .dat file decryption ─────────────────────────────────────────────────────
@@ -691,9 +711,45 @@ fn find_unique_video_hash_by_time(video_dir: &Path, create_time: i64) -> Option<
     candidates.into_iter().next()
 }
 
-/// Resolve the exact thumbnail cache identity that a UI fetch must upgrade.
-/// A medium or high-resolution file means no UI action is needed; an ambiguous
-/// timestamp match returns None and therefore cannot produce a click target.
+fn video_target_for_base(base: &Path, year_month: &str, hash: &str) -> Option<VideoDownloadCacheTarget> {
+    if hash.len() != 32 || !hash.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) {
+        return None;
+    }
+    Some(VideoDownloadCacheTarget {
+        video_dir: base.join("msg/video").join(year_month),
+        stem: hash.to_string(),
+    })
+}
+
+/// Only the message-resource DB is strong enough to authorize a UI video click.
+/// The timestamp fallback used by media previews is deliberately excluded.
+pub fn get_video_download_cache_target(
+    account_dir: &str,
+    keys: &HashMap<String, String>,
+    chat_id: &str,
+    local_id: i64,
+) -> Option<VideoDownloadCacheTarget> {
+    let (local_type, create_time, _) = lookup_message_raw(account_dir, keys, chat_id, local_id)?;
+    if (local_type & 0xFFFF_FFFF) as i32 != 43 {
+        return None;
+    }
+    let hash = find_file_hash_via_resource_db(account_dir, keys, chat_id, local_id)?;
+    let year_month = chrono::DateTime::from_timestamp(create_time, 0)?.format("%Y-%m").to_string();
+    for base in account_base_paths(account_dir) {
+        let target = video_target_for_base(Path::new(&base), &year_month, &hash)?;
+        if target.video_dir.join(format!("{}_thumb.jpg", target.stem)).is_file()
+            || target.video_dir.join(format!("{}.jpg", target.stem)).is_file()
+            || target.video_dir.join(format!("{}.mp4", target.stem)).is_file()
+        {
+            return Some(target);
+        }
+    }
+    None
+}
+
+/// Resolve the exact image cache identity that a UI fetch must upgrade.
+/// Encrypted medium/high-resolution files still need a native export when the
+/// image AES key is unavailable. Ambiguous matches fail closed.
 pub fn get_image_download_cache_target(
     account_dir: &str,
     keys: &HashMap<String, String>,
@@ -1085,45 +1141,122 @@ fn get_voice_data(
 
 // ── File attachment ──────────────────────────────────────────────────────────
 
+fn read_file_attachment_from_month(
+    month_dir: &Path,
+    filename: &str,
+    expected_size: Option<u64>,
+    expected_md5: Option<&str>,
+) -> Option<Vec<u8>> {
+    let named_path = month_dir.join(filename);
+    if named_path.is_file() {
+        return fs::read(named_path).ok();
+    }
+
+    let size = expected_size?;
+    let md5 = expected_md5?.to_ascii_lowercase();
+    if md5.len() != 32 || !md5.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+
+    for entry in fs::read_dir(month_dir).ok()?.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if metadata.len() != size {
+            continue;
+        }
+        let Ok(data) = fs::read(entry.path()) else {
+            continue;
+        };
+        if format!("{:x}", Md5::digest(&data)) == md5 {
+            return Some(data);
+        }
+    }
+    None
+}
+
 fn get_file_attachment(
     account_dir: &str,
     content: &str,
     create_time: i64,
     local_id: i64,
 ) -> MediaResult {
+    let bases = account_base_paths(account_dir).map(PathBuf::from);
+    get_file_attachment_from_bases(&bases, content, create_time, local_id)
+}
+
+fn get_file_attachment_from_bases(
+    bases: &[PathBuf],
+    content: &str,
+    create_time: i64,
+    local_id: i64,
+) -> MediaResult {
     let filename = extract_xml_tag(content, "title").unwrap_or_else(|| format!("file_{local_id}"));
     let ext = extract_xml_tag(content, "fileext").unwrap_or_default();
+    let expected_size = extract_xml_tag(content, "totallen").and_then(|value| value.parse().ok());
+    let expected_md5 = extract_xml_tag(content, "md5");
 
-    // Files are stored at <account>/msg/file/YYYY-MM/<filename>
+    // WeChat may rename cached files inside msg/file/YYYY-MM; match by message identity.
     let dt = chrono::DateTime::from_timestamp(create_time, 0);
-    let year_month = dt.map(|d| d.format("%Y-%m").to_string()).unwrap_or_default();
+    let year_month = dt
+        .map(|d| d.format("%Y-%m").to_string())
+        .unwrap_or_default();
 
-    for base in &account_base_paths(account_dir) {
-        let file_path = Path::new(base)
-            .join("msg/file")
-            .join(&year_month)
-            .join(&filename);
-        if file_path.exists() {
-            if let Ok(data) = fs::read(&file_path) {
-                return MediaResult {
-                    media_type: "file".into(),
-                    data: Some(base64::Engine::encode(
-                        &base64::engine::general_purpose::STANDARD,
-                        &data,
-                    )),
-                    url: None,
-                    format: ext,
-                    filename,
-                };
-            }
+    for base in bases {
+        let month_dir = base.join("msg/file").join(&year_month);
+        if let Some(data) = read_file_attachment_from_month(
+            &month_dir,
+            &filename,
+            expected_size,
+            expected_md5.as_deref(),
+        ) {
+            return MediaResult {
+                media_type: "file".into(),
+                data: Some(base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &data,
+                )),
+                url: None,
+                format: ext,
+                filename,
+            };
         }
     }
 
-    // File not yet downloaded by WeChat
-    pending()
+    MediaResult {
+        media_type: "file".into(),
+        data: None,
+        url: None,
+        format: ext,
+        filename,
+    }
 }
 
 // ── Public entry point ───────────────────────────────────────────────────────
+
+/// Resolve file metadata using message DB keys before any media/image key extraction.
+pub fn get_message_file_media(
+    account_dir: &str,
+    keys: &HashMap<String, String>,
+    chat_id: &str,
+    local_id: i64,
+) -> Option<MediaResult> {
+    let (local_type, create_time, content) =
+        lookup_message_raw(account_dir, keys, chat_id, local_id)?;
+    let base = (local_type & 0xFFFFFFFF) as i32;
+    let sub = (local_type >> 32) as i32;
+    if base == 49 && sub == 6 {
+        Some(get_file_attachment(account_dir, &content, create_time, local_id))
+    } else {
+        None
+    }
+}
 
 /// Get media attachment for a message.
 pub fn get_message_media(
@@ -1197,6 +1330,19 @@ pub fn get_message_media(
                 tracing::warn!("[media] no image keys available for local_id={}", local_id);
             }
 
+            if let Some(dat_path) = find_dat_via_resource_db(
+                account_dir,
+                keys,
+                chat_id,
+                local_id,
+                create_time,
+            ) {
+                if let Some(preview) = get_saved_image_preview(&dat_path, local_id) {
+                    tracing::info!("[media] using saved UI preview for local_id={}", local_id);
+                    return preview;
+                }
+            }
+
             if let Some(thumb) =
                 get_image_thumbnail(account_dir, chat_id, local_id, create_time)
             {
@@ -1242,7 +1388,8 @@ pub fn get_message_media(
 mod timestamp_fallback_tests {
     use super::{
         find_best_image_dat, find_unique_dat_by_time, find_unique_video_hash_by_time,
-        image_dat_variant_path, image_download_cache_target, image_filename, ImageDatVariant,
+        get_saved_image_preview, image_dat_variant_path, image_download_cache_target,
+        image_filename, video_target_for_base, ImageDatVariant,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1381,14 +1528,118 @@ mod timestamp_fallback_tests {
     }
 
     #[test]
-    fn derives_a_download_target_only_from_an_exact_thumbnail_variant() {
+    fn video_download_target_requires_a_verified_hash() {
+        let base = Path::new("/home/wechat/xwechat_files/account");
+        let target = video_target_for_base(base, "2026-09", "dc56ab6e1f2966add09194099ade5c3c")
+            .unwrap();
+        assert_eq!(target.video_dir, base.join("msg/video/2026-09"));
+        assert_eq!(target.stem, "dc56ab6e1f2966add09194099ade5c3c");
+        assert!(video_target_for_base(base, "2026-09", "../wrong").is_none());
+    }
+
+    #[test]
+    fn derives_a_download_target_from_any_exact_image_variant() {
         let thumbnail = Path::new("/tmp/image-a_t.dat");
         let medium = Path::new("/tmp/image-a.dat");
+        let high = Path::new("/tmp/image-a_h.dat");
 
         assert_eq!(
             image_download_cache_target(thumbnail),
             Some((PathBuf::from("/tmp"), "image-a".to_string()))
         );
-        assert_eq!(image_download_cache_target(medium), None);
+        assert_eq!(
+            image_download_cache_target(medium),
+            Some((PathBuf::from("/tmp"), "image-a".to_string()))
+        );
+        assert_eq!(
+            image_download_cache_target(high),
+            Some((PathBuf::from("/tmp"), "image-a".to_string()))
+        );
+    }
+
+    #[test]
+    fn serves_native_export_for_high_resolution_dat_variant() {
+        let temporary = TempDir::new().unwrap();
+        let high_resolution = temporary.path().join("image-a_h.dat");
+        fs::write(&high_resolution, b"encrypted").unwrap();
+        fs::write(temporary.path().join("image-a_preview.jpg"), b"native-jpeg").unwrap();
+
+        let media = get_saved_image_preview(high_resolution.to_str().unwrap(), 22).unwrap();
+        assert_eq!(media.filename, "msg_22.jpg");
+        assert_eq!(media.format, "jpeg");
+        assert_eq!(media.data.as_deref(), Some("bmF0aXZlLWpwZWc="));
+    }
+}
+
+#[cfg(test)]
+mod file_media_tests {
+    use super::{
+        get_file_attachment, get_file_attachment_from_bases, read_file_attachment_from_month,
+    };
+    use std::fs;
+
+    #[test]
+    fn undownloaded_file_retains_kind_and_filename_for_direct_download() {
+        let media = get_file_attachment(
+            "nonexistent-file-media-test-account",
+            "<msg><appmsg><title>项目说明.pdf</title><fileext>pdf</fileext></appmsg></msg>",
+            1_779_000_000,
+            45,
+        );
+
+        assert_eq!(media.media_type, "file");
+        assert_eq!(media.filename, "项目说明.pdf");
+        assert_eq!(media.format, "pdf");
+        assert!(media.data.is_none());
+    }
+
+    #[test]
+    fn renamed_wechat_cache_file_is_found_by_message_size_and_md5() {
+        let root = tempfile::tempdir().unwrap();
+        let expected = b"%PDF-1.4\nfixture";
+        fs::write(root.path().join("2026-09(8)"), b"%PDF-1.4\nWRONGxx").unwrap();
+        fs::write(root.path().join("2026-09(9)"), expected).unwrap();
+
+        let bytes = read_file_attachment_from_month(
+            root.path(),
+            "《创始人行动手册》.pdf",
+            Some(16),
+            Some("6ecdbd413b9974b15a85c9e1a503d2bd"),
+        );
+
+        assert_eq!(bytes.as_deref(), Some(expected.as_slice()));
+    }
+
+    #[test]
+    fn renamed_cache_file_without_message_md5_is_not_guessed() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("2026-09(9)"), b"%PDF-1.4\nfixture").unwrap();
+
+        assert!(read_file_attachment_from_month(
+            root.path(),
+            "《创始人行动手册》.pdf",
+            Some(16),
+            None,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn file_message_xml_resolves_renamed_cached_pdf() {
+        let root = tempfile::tempdir().unwrap();
+        let month = root.path().join("msg/file/2026-09");
+        fs::create_dir_all(&month).unwrap();
+        fs::write(month.join("2026-09(9)"), b"%PDF-1.4\nfixture").unwrap();
+        let xml = "<msg><appmsg><title>《创始人行动手册》.pdf</title>\
+            <appattach><totallen>16</totallen><md5>6ecdbd413b9974b15a85c9e1a503d2bd</md5>\
+            <fileext>pdf</fileext></appattach></appmsg></msg>";
+
+        let media =
+            get_file_attachment_from_bases(&[root.path().to_path_buf()], xml, 1_790_271_079, 64);
+
+        assert_eq!(media.media_type, "file");
+        assert_eq!(media.filename, "《创始人行动手册》.pdf");
+        assert_eq!(media.format, "pdf");
+        assert_eq!(media.data.as_deref(), Some("JVBERi0xLjQKZml4dHVyZQ=="));
     }
 }

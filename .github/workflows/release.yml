@@ -93,7 +93,7 @@ jobs:
       - name: Build binary in Docker
         run: |
           RUST_DIR="packages/agent-server-rust"
-          BUILDER_IMAGE="rust:1.93-bookworm"
+          BUILDER_IMAGE="rust:1.93-bullseye@sha256:fae8ebcb8eda28d37df2b965c87c15a572dac2b6d3893a72d6dea99d700d1786"
 
           docker run --rm \
             --platform ${{ matrix.platform }} \
@@ -200,6 +200,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: docker
+          build-args: SOURCE_SHA=${{ github.sha }}
           platforms: ${{ matrix.platform }}
           outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ matrix.arch }}

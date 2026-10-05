@@ -204,27 +204,26 @@ async fn run(id: String, extension: String) {
         session.linux_user, id, extension
     );
     let local_id = operation.local_id.to_string();
+    let mut command_args = vec![
+        "--chat-id",
+        operation.chat_id.as_str(),
+        "--chat-name",
+        operation.chat_name.as_str(),
+        "--local-id",
+        local_id.as_str(),
+        "--filename",
+        operation.expected_filename.as_str(),
+        "--output",
+        output_path.as_str(),
+    ];
+    if let Some(sent_at) = operation.sent_at.as_deref() {
+        command_args.extend(["--sent-at", sent_at]);
+    }
     let options = ExecOptions {
         session: Some(session),
         timeout_ms: 300_000,
     };
-    let result = exec_command(
-        "/opt/tools/file-download",
-        &[
-            "--chat-id",
-            &operation.chat_id,
-            "--chat-name",
-            &operation.chat_name,
-            "--local-id",
-            &local_id,
-            "--filename",
-            &operation.expected_filename,
-            "--output",
-            &output_path,
-        ],
-        &options,
-    )
-    .await;
+    let result = exec_command("/opt/tools/file-download", &command_args, &options).await;
     if result.exit_code != 0 {
         let code = serde_json::from_str::<serde_json::Value>(&result.stdout)
             .ok()
@@ -261,6 +260,7 @@ pub async fn create(Json(input): Json<CreateRequest>) -> Response {
              ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,'queued')
              ON CONFLICT(idempotency_key) DO UPDATE SET
                  chat_name=excluded.chat_name,
+                 sent_at=COALESCE(file_download_operations.sent_at, excluded.sent_at),
                  state=CASE
                      WHEN file_download_operations.state IN ('ready','completed')
                          THEN file_download_operations.state

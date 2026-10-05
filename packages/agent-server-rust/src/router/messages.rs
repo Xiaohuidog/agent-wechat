@@ -15,7 +15,7 @@ use crate::ia::types::{MediaResult, Message, SendResult, SubscriptionEvent};
 use crate::plans::send_message::{SendMessageParams, SendMessagePlan};
 use crate::tools::wechat_db::{find_wechat_pid, list_account_dbs};
 use crate::tools::wechat_keys::{extract_keys_async, get_stored_keys, get_image_keys, store_keys};
-use crate::tools::wechat_media::get_message_media;
+use crate::tools::wechat_media::{get_message_file_media, get_message_media};
 use crate::tools::wechat_messages;
 use crate::sessions::manager::get_session;
 
@@ -170,6 +170,10 @@ pub async fn resolve_media(chat_id: &str, local_id: i64) -> MediaResult {
         get_stored_keys(&db, &session.id, &logged_in_user)
     };
 
+    if let Some(file_media) = get_message_file_media(&logged_in_user, &keys, chat_id, local_id) {
+        return file_media;
+    }
+
     // Lazy key extraction: if media_*.db files exist on disk without stored keys, extract them
     let on_disk = list_account_dbs(&logged_in_user);
     let has_missing_media = on_disk.iter().any(|name| {
@@ -186,10 +190,39 @@ pub async fn resolve_media(chat_id: &str, local_id: i64) -> MediaResult {
         }
     }
 
-    let image_keys = {
+    let mut image_keys = {
         let db = get_db();
         get_image_keys(&db, &session.id, &logged_in_user)
     };
+
+    // A UI preview is already a readable JPEG saved by the image downloader.
+    // Return it before retrying image-key extraction, which can block on a
+    // WeChat build whose offsets are not known yet.
+    let cached_media = get_message_media(
+        &logged_in_user,
+        &keys,
+        chat_id,
+        local_id,
+        image_keys.clone(),
+    );
+    if should_return_cached_media(&cached_media) {
+        return cached_media;
+    }
+
+    // The regular database keys can already be present after login while the
+    // image AES key is still missing. Retry extraction before returning an
+    // empty image payload so existing .dat files can be decrypted.
+    if image_keys.is_none() {
+        if let Some(pid) = find_wechat_pid() {
+            let extracted = extract_keys_async(pid).await;
+            if !extracted.is_empty() {
+                let db = get_db();
+                store_keys(&db, &session.id, &logged_in_user, &extracted);
+                image_keys = get_image_keys(&db, &session.id, &logged_in_user);
+                keys = get_stored_keys(&db, &session.id, &logged_in_user);
+            }
+        }
+    }
 
     get_message_media(
         &logged_in_user,
@@ -200,8 +233,31 @@ pub async fn resolve_media(chat_id: &str, local_id: i64) -> MediaResult {
     )
 }
 
+fn should_return_cached_media(media: &MediaResult) -> bool {
+    media.data.is_some() || matches!(media.media_type.as_str(), "image" | "file")
+}
+
 pub async fn get_media(Path((chat_id, local_id)): Path<(String, i64)>) -> Json<MediaResult> {
     Json(resolve_media(&chat_id, local_id).await)
+}
+
+#[cfg(test)]
+mod file_media_tests {
+    use super::should_return_cached_media;
+    use crate::ia::types::MediaResult;
+
+    #[test]
+    fn pending_file_skips_unrelated_image_key_extraction() {
+        let file = MediaResult {
+            media_type: "file".into(),
+            data: None,
+            url: None,
+            format: "pdf".into(),
+            filename: "项目说明.pdf".into(),
+        };
+
+        assert!(should_return_cached_media(&file));
+    }
 }
 
 #[derive(Deserialize)]

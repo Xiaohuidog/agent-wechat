@@ -62,6 +62,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: docker
+          build-args: SOURCE_SHA=${{ github.sha }}
           platforms: ${{ matrix.platform }}
           no-cache: ${{ inputs.no-cache }}
           outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true

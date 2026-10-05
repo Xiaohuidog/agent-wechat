@@ -1,5 +1,11 @@
 # @agent-wechat/agent-server
 
+## 0.20.0
+
+### Minor Changes
+
+- Establish a single stable release from the integrated 0.14.0 source without changing runtime behavior.
+
 ## 0.14.0
 
 ### Minor Changes

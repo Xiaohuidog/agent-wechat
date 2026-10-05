@@ -1,5 +1,7 @@
 # agent-wechat
 
+Current stable release: **v0.20.0**. Continue development from this release or a descendant of `main`; keep local, GitHub, and production on the same published source revision.
+
 A programmable WeChat interface. Controls a WeChat client running in a Docker container — receive and send messages, see chat heads, and more via API, CLI, Wechaty puppet, or OpenClaw plugin.
 
 **[Documentation](https://thisnick.github.io/agent-wechat/)**

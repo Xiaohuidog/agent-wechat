@@ -1,6 +1,6 @@
 {
   "name": "agent-wechat",
-  "version": "0.1.0",
+  "version": "0.20.0",
   "description": "WeChat automation via deterministic FSM",
   "private": true,
   "type": "module",

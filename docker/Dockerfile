@@ -1,7 +1,7 @@
 # ============================================
 # Stage 1: Build the Rust server binary
 # ============================================
-FROM rust:1.93-bookworm AS builder
+FROM rust:1.93-bullseye@sha256:fae8ebcb8eda28d37df2b965c87c15a572dac2b6d3893a72d6dea99d700d1786 AS builder
 
 ARG BUILD_MODE=release
 

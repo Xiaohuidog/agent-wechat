@@ -59,7 +59,8 @@ impl IAState for LoginAccountState {
 
     fn identify(&self, args: &IdentifyArgs) -> Result<IdentifyResult, String> {
         let log_in_btn = query_selector(args.a11y, r#"push-button[name="Log In"]"#)
-            .or_else(|| query_selector(args.a11y, r#"push-button[name="Open WeChat"]"#));
+            .or_else(|| query_selector(args.a11y, r#"push-button[name="Open WeChat"]"#))
+            .or_else(|| query_selector(args.a11y, r#"push-button[name="Enter Weixin"]"#));
         if log_in_btn.is_none() {
             return Ok(IdentifyResult { identified: false, frame: None });
         }
@@ -192,3 +193,22 @@ pub static LOGIN_STATES: std::sync::LazyLock<Vec<Box<dyn IAState>>> = std::sync:
         Box::new(LoginLoadingState),
     ]
 });
+
+#[cfg(test)]
+mod saved_account_tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_enter_weixin_saved_account_button() {
+        let tree: A11yNode = serde_json::from_value(serde_json::json!({
+            "role": "application", "name": "Weixin", "children": [
+                {"role": "push-button", "name": "Enter Weixin"},
+                {"role": "push-button", "name": "Switch Account"}
+            ]
+        })).unwrap();
+
+        let result = LoginAccountState.identify(&IdentifyArgs { a11y: &tree, screenshot: "" }).unwrap();
+
+        assert!(result.identified);
+    }
+}

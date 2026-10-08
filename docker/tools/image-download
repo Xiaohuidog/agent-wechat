@@ -14,7 +14,7 @@ import time
 
 from PIL import Image
 
-RESAMPLE_BILINEAR = getattr(getattr(Image, "Resampling", Image), "BILINEAR")
+RESAMPLE_BILINEAR = getattr(Image, "Resampling", Image).BILINEAR
 
 
 class DownloadError(Exception):
@@ -29,7 +29,7 @@ def fail(code):
 def command(*args, timeout=15, check=True):
     name = os.path.basename(str(args[0])).upper().replace("-", "_")
     try:
-        result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
     except subprocess.TimeoutExpired as error:
         raise DownloadError(f"{name}_TIMEOUT") from error
     if check and result.returncode != 0:
@@ -251,7 +251,7 @@ def publish_native_image(native_path, image_dir, stem, local_id, preview_path, t
 
 
 def selected_chat(value, chat_name):
-    return any(
+    selected_row = any(
         item.get("role") == "list-item"
         and "SELECTED" in (item.get("states") or [])
         and (
@@ -260,6 +260,15 @@ def selected_chat(value, chat_name):
         )
         for item in walk(value)
     )
+    open_header = any(
+        item.get("role") == "label" and item.get("name") == chat_name
+        for item in walk(value)
+    )
+    message_list = any(
+        item.get("role") == "list" and item.get("name") == "Messages"
+        for item in walk(value)
+    )
+    return selected_row or (open_header and message_list)
 
 
 def unique_chat_item(value, chat_name):
@@ -270,10 +279,15 @@ def unique_chat_item(value, chat_name):
         and (item["name"] == chat_name or item["name"].startswith(chat_name + " "))
         and item.get("bounds")
     ]
-    if len(matches) > 1:
-        raise DownloadError("CHAT_IDENTITY_AMBIGUOUS")
     if not matches:
         raise DownloadError("CHAT_UI_NOT_FOUND")
+    if len(matches) > 1:
+        ranked = sorted(matches, key=lambda item: float(item["bounds"].get("height", 0)), reverse=True)
+        if (float(ranked[0]["bounds"].get("height", 0)) < 48
+                or float(ranked[0]["bounds"].get("height", 0))
+                - float(ranked[1]["bounds"].get("height", 0)) < 16):
+            raise DownloadError("CHAT_IDENTITY_AMBIGUOUS")
+        return ranked[0]
     return matches[0]
 
 
@@ -281,7 +295,35 @@ def select_chat(chat_name):
     current = tree()
     if selected_chat(current, chat_name):
         return
-    item = unique_chat_item(current, chat_name)
+    try:
+        item = unique_chat_item(current, chat_name)
+    except DownloadError as error:
+        if str(error) != "CHAT_UI_NOT_FOUND":
+            raise
+        search = next((node for node in walk(current)
+                       if node.get("role") == "text" and node.get("name") == "Search"
+                       and node.get("bounds")), None)
+        if search is None:
+            raise DownloadError("CHAT_SEARCH_UNAVAILABLE") from error
+        bounds = search["bounds"]
+        x = round(float(bounds["x"]) + float(bounds["width"]) / 2)
+        y = round(float(bounds["y"]) + float(bounds["height"]) / 2)
+        command("xdotool", "mousemove", str(x), str(y), "click", "1")
+        command("xdotool", "key", "--clearmodifiers", "ctrl+a")
+        command("/opt/tools/input", chat_name)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            current = tree()
+            try:
+                item = unique_chat_item(current, chat_name)
+                break
+            except DownloadError as retry_error:
+                if str(retry_error) != "CHAT_UI_NOT_FOUND":
+                    raise
+            time.sleep(0.4)
+        else:
+            command("xdotool", "key", "--clearmodifiers", "Escape", check=False)
+            raise DownloadError("CHAT_UI_NOT_FOUND") from error
     bounds = item["bounds"]
     x = round(float(bounds["x"]) + float(bounds["width"]) / 2)
     y = round(float(bounds["y"]) + float(bounds["height"]) / 2)
@@ -329,7 +371,7 @@ def copy_viewer_image(preview_path):
     while time.monotonic() < deadline:
         copied = subprocess.run(
             ["xclip", "-selection", "clipboard", "-t", "image/png", "-o"],
-            capture_output=True, timeout=5,
+            capture_output=True, timeout=5, check=False,
         )
         if copied.returncode == 0 and copied.stdout:
             return publish_clipboard_image(copied.stdout, preview_path)
@@ -398,7 +440,7 @@ def main():
         cleared = subprocess.run(
             ["xclip", "-selection", "clipboard", "-i"],
             input=b"GROUPBOT_IMAGE_CLIPBOARD_SENTINEL",
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False,
         )
         if cleared.returncode != 0:
             raise DownloadError("IMAGE_CLIPBOARD_CLEAR_FAILED")

@@ -257,6 +257,14 @@ fn get_saved_image_preview(dat_path: &str, local_id: i64) -> Option<MediaResult>
     })
 }
 
+fn get_saved_image_preview_from_target(
+    target: &ImageDownloadCacheTarget,
+    local_id: i64,
+) -> Option<MediaResult> {
+    let dat_path = target.image_dir.join(format!("{}.dat", target.stem));
+    get_saved_image_preview(dat_path.to_str()?, local_id)
+}
+
 // ── .dat file decryption ─────────────────────────────────────────────────────
 
 fn aligned_aes_size(enc_chunk_size: u32) -> u32 {
@@ -1343,6 +1351,17 @@ pub fn get_message_media(
                 }
             }
 
+            // The downloader can identify an exact cache file through the
+            // hardlink or timestamp path when the resource database has no row.
+            if let Some(target) =
+                get_image_download_cache_target(account_dir, keys, chat_id, local_id)
+            {
+                if let Some(preview) = get_saved_image_preview_from_target(&target, local_id) {
+                    tracing::info!("[media] using saved UI preview for local_id={}", local_id);
+                    return preview;
+                }
+            }
+
             if let Some(thumb) =
                 get_image_thumbnail(account_dir, chat_id, local_id, create_time)
             {
@@ -1388,8 +1407,9 @@ pub fn get_message_media(
 mod timestamp_fallback_tests {
     use super::{
         find_best_image_dat, find_unique_dat_by_time, find_unique_video_hash_by_time,
-        get_saved_image_preview, image_dat_variant_path, image_download_cache_target,
-        image_filename, video_target_for_base, ImageDatVariant,
+        get_saved_image_preview, get_saved_image_preview_from_target, image_dat_variant_path,
+        image_download_cache_target, image_filename, video_target_for_base,
+        ImageDatVariant, ImageDownloadCacheTarget,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1568,6 +1588,21 @@ mod timestamp_fallback_tests {
         assert_eq!(media.filename, "msg_22.jpg");
         assert_eq!(media.format, "jpeg");
         assert_eq!(media.data.as_deref(), Some("bmF0aXZlLWpwZWc="));
+    }
+
+    #[test]
+    fn serves_saved_preview_from_exact_cache_target_without_resource_row() {
+        let temporary = TempDir::new().unwrap();
+        fs::write(temporary.path().join("image-a_preview.jpg"), b"full-image").unwrap();
+        let target = ImageDownloadCacheTarget {
+            image_dir: temporary.path().to_path_buf(),
+            stem: "image-a".to_string(),
+        };
+
+        let media = get_saved_image_preview_from_target(&target, 99).unwrap();
+
+        assert_eq!(media.filename, "msg_99.jpg");
+        assert_eq!(media.data.as_deref(), Some("ZnVsbC1pbWFnZQ=="));
     }
 }
 

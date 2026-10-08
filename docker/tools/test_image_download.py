@@ -5,9 +5,9 @@ import pathlib
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
 from PIL import Image
-
 
 MODULE_PATH = pathlib.Path(__file__).with_name("image-download")
 LOADER = importlib.machinery.SourceFileLoader("image_download", str(MODULE_PATH))
@@ -71,6 +71,45 @@ class ImageMatchTest(unittest.TestCase):
 
 
 class NativeImageSaveTest(unittest.TestCase):
+    def test_select_chat_searches_when_target_is_not_in_visible_list(self):
+        search = {"role": "text", "name": "Search", "bounds": {"x": 100, "y": 40, "width": 200, "height": 30}}
+        target = {"role": "list-item", "name": "群测试 小晖: [Photo]", "bounds": {"x": 100, "y": 200, "width": 220, "height": 60}}
+        selected = {**target, "states": ["SELECTED"]}
+        trees = iter([
+            {"children": [search]},
+            {"children": [search, target]},
+            {"children": [search, selected]},
+        ])
+        calls = []
+
+        def command(*args, **_kwargs):
+            calls.append(args)
+
+        with patch.object(image_download, "tree", side_effect=lambda: next(trees)), \
+             patch.object(image_download, "command", side_effect=command), \
+             patch.object(image_download.time, "sleep"):
+            image_download.select_chat("群测试")
+
+        self.assertIn(("/opt/tools/input", "群测试"), calls)
+        self.assertTrue(any(call[:2] == ("xdotool", "mousemove") and "click" in call for call in calls))
+
+    def test_search_chooses_full_chat_row_over_same_name_suggestion(self):
+        chat = {"role": "list-item", "name": "群测试", "bounds": {"x": 273, "y": 184, "width": 320, "height": 64}}
+        suggestion = {"role": "list-item", "name": "群测试", "bounds": {"x": 273, "y": 280, "width": 320, "height": 34}}
+
+        self.assertEqual(
+            image_download.unique_chat_item({"children": [suggestion, chat]}, "群测试"),
+            chat,
+        )
+
+    def test_open_chat_is_confirmed_by_header_when_search_results_disappear(self):
+        opened = {"children": [
+            {"role": "label", "name": "群测试"},
+            {"role": "list", "name": "Messages"},
+        ]}
+
+        self.assertTrue(image_download.selected_chat(opened, "群测试"))
+
     def test_identifies_only_one_target_chat_item(self):
         target = {"role": "list-item", "name": "群测试 小晖Allen: [Photo]", "bounds": {"x": 212, "y": 318, "width": 210, "height": 68}}
         tree = {"children": [target, {"role": "list-item", "name": "其他群", "bounds": {"x": 212, "y": 400, "width": 210, "height": 68}}]}
@@ -110,9 +149,10 @@ class NativeImageSaveTest(unittest.TestCase):
         )
 
     def test_missing_native_image_is_not_published(self):
-        with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaisesRegex(image_download.DownloadError, "IMAGE_NATIVE_DECODE_MISSING"):
-                image_download.native_image_size(pathlib.Path(directory) / "missing.jpg", timeout_seconds=0)
+        with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(
+            image_download.DownloadError, "IMAGE_NATIVE_DECODE_MISSING"
+        ):
+            image_download.native_image_size(pathlib.Path(directory) / "missing.jpg", timeout_seconds=0)
 
     def test_publishes_only_the_matching_native_image(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -1,10 +1,11 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::ia::identify_states;
+use crate::ia::selectors::query_selector;
 use crate::sessions::manager::get_session;
 use crate::tools::a11y::get_a11y_desktop;
-use crate::tools::exec::ExecOptions;
+use crate::tools::exec::{exec_command, ExecOptions};
 use crate::tools::screenshot::capture_screenshot;
 use crate::tools::wechat_db::find_wechat_pid;
 
@@ -66,6 +67,7 @@ pub fn spawn_health_monitor() {
         let mut restart_count: u32 = 0;
         let mut window_start = Instant::now();
         let mut waiting_restart_since: Option<Instant> = None;
+        let mut last_saved_account_attempt: Option<Instant> = None;
 
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(SCAN_INTERVAL_SECS)).await;
@@ -155,6 +157,24 @@ pub fn spawn_health_monitor() {
                 .await
                 .unwrap_or_default();
             let identified = identify_states(&a11y, &screenshot);
+
+            if identified.main_window.as_ref().is_some_and(|state| state.state_id == "login_account")
+                && identified.popup.is_none()
+                && last_saved_account_attempt.is_none_or(|at| at.elapsed() >= Duration::from_secs(30))
+            {
+                if let Some(bounds) = query_selector(
+                    &a11y,
+                    r#"push-button[name=/^(Log In|Open WeChat|Enter Weixin)$/]"#,
+                ).and_then(|button| button.bounds.as_ref()) {
+                    let x = (bounds.x + bounds.width / 2.0).round().to_string();
+                    let y = (bounds.y + bounds.height / 2.0).round().to_string();
+                    last_saved_account_attempt = Some(Instant::now());
+                    let result = exec_command("/opt/tools/click", &[&x, &y], &exec_options).await;
+                    if result.exit_code != 0 {
+                        tracing::warn!("[health] saved-account entry click failed");
+                    }
+                }
+            }
 
             if identified.main_window.is_some() {
                 // State identified — WeChat is responsive

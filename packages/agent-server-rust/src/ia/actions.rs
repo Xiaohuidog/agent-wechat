@@ -44,7 +44,26 @@ pub fn close_window() -> Action {
 
 pub fn click_login() -> Action {
     Action::ClickSelector {
-        selector: r#"push-button[name=/^(Log In|Open WeChat)$/]"#.to_string(),
+        selector: r#"push-button[name=/^(Log In|Open WeChat|Enter Weixin)$/]"#.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod saved_account_tests {
+    use super::*;
+    use crate::ia::selectors::query_selector;
+    use crate::ia::types::A11yNode;
+
+    #[test]
+    fn login_action_can_click_enter_weixin() {
+        let tree: A11yNode = serde_json::from_value(serde_json::json!({
+            "role": "application", "name": "Weixin", "children": [
+                {"role": "push-button", "name": "Enter Weixin"}
+            ]
+        })).unwrap();
+        let Action::ClickSelector { selector } = click_login() else { panic!("expected selector") };
+
+        assert!(query_selector(&tree, &selector).is_some());
     }
 }
 

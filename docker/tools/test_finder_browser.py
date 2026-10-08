@@ -36,3 +36,16 @@ def test_remote_error_code_requires_integer():
     assert finder_browser.remote_error_code({"errCode": 0}) == 0
     assert finder_browser.remote_error_code({"errcode": 300330}) == 300330
     assert finder_browser.remote_error_code({"errCode": "0"}) is None
+
+
+def test_show_maps_minimized_browser_before_activation(monkeypatch):
+    calls = []
+    monkeypatch.setattr(finder_browser.subprocess, "run", lambda command, **kwargs: calls.append(command))
+    browser = finder_browser.FinderBrowser.__new__(finder_browser.FinderBrowser)
+    browser._page = type("Page", (), {"url": finder_browser.POST_LIST_URL})()
+    browser._minimized = True
+    browser.status = lambda: "login_required"
+
+    assert browser.show() == "login_required"
+    assert calls == [["xdotool", "search", "--class", "chromium", "windowmap", "windowactivate", "%@"]]
+    assert browser._minimized is False

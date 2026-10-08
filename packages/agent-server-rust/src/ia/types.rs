@@ -412,6 +412,14 @@ pub struct ReplyInfo {
 pub struct FinderInfo {
     pub object_id: String,
     pub object_nonce_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    pub has_cover: bool,
+    pub has_playable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_seconds: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

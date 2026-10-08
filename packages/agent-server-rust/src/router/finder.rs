@@ -1,6 +1,9 @@
-use axum::{http::StatusCode, response::IntoResponse, Json};
+use axum::{extract::Path, http::StatusCode, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
 
+use crate::db::{get_db, queries::finder_message_xml};
+use crate::sessions::manager::get_session;
+use crate::tools::wechat_messages::finder_media_url;
 use crate::tools::finder_short_link::{
     browser_status, resolve_short_link, show_browser, FinderShortLinkError,
 };
@@ -42,6 +45,29 @@ pub async fn short_link(Json(input): Json<ShortLinkInput>) -> impl IntoResponse 
             (status, Json(serde_json::json!({"error": error.code()})))
         }
     }
+}
+
+pub async fn media_source(Path((chat_id, local_id, kind)): Path<(String, i64, String)>) -> impl IntoResponse {
+    if kind != "cover" && kind != "playable" {
+        return (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({"error": "FINDER_MEDIA_KIND_INVALID"})));
+    }
+    let Some(session) = get_session("default") else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "FINDER_SESSION_UNAVAILABLE"})));
+    };
+    let Some(account_dir) = session.logged_in_user.as_deref() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "FINDER_SESSION_UNAVAILABLE"})));
+    };
+    let source = {
+        let db = get_db();
+        finder_message_xml(&db, &session.id, account_dir, &chat_id, local_id)
+    };
+    let Ok(Some(xml)) = source else {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "FINDER_MEDIA_SOURCE_NOT_FOUND"})));
+    };
+    let Some(url) = finder_media_url(&xml, &kind) else {
+        return (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({"error": "FINDER_MEDIA_SOURCE_INVALID"})));
+    };
+    (StatusCode::OK, Json(serde_json::json!({"url": url})))
 }
 
 pub async fn session_status() -> impl IntoResponse {

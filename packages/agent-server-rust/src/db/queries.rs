@@ -40,6 +40,17 @@ pub fn upsert_finder_message_source(
     Ok(())
 }
 
+pub fn finder_message_xml(
+    conn: &Connection, session_id: &str, account_dir: &str, chat_id: &str, local_id: i64,
+) -> rusqlite::Result<Option<String>> {
+    use rusqlite::OptionalExtension;
+    conn.query_row(
+        "SELECT raw_xml FROM finder_message_sources WHERE session_id=?1 AND account_dir=?2 AND chat_id=?3 AND local_id=?4",
+        params![session_id, account_dir, chat_id, local_id],
+        |row| row.get(0),
+    ).optional()
+}
+
 // ============================================
 // SYNC STATE QUERIES
 // ============================================
@@ -125,7 +136,7 @@ pub fn clear_session_data(conn: &Connection, session_id: &str) {
 
 #[cfg(test)]
 mod finder_source_tests {
-    use super::{upsert_finder_message_source, FinderMessageSource};
+    use super::{finder_message_xml, upsert_finder_message_source, FinderMessageSource};
     use rusqlite::Connection;
 
     fn source<'a>(raw_xml: &'a str, object_nonce_id: &'a str) -> FinderMessageSource<'a> {
@@ -176,5 +187,7 @@ mod finder_source_tests {
         assert_eq!(stored.0, 1);
         assert_eq!(stored.1, "nonce-two");
         assert_eq!(stored.2, "<msg>second</msg>");
+        assert_eq!(finder_message_xml(&conn, "default", "wxid_test", "group@chatroom", 5023).unwrap().as_deref(), Some("<msg>second</msg>"));
+        assert_eq!(finder_message_xml(&conn, "default", "other", "group@chatroom", 5023).unwrap(), None);
     }
 }

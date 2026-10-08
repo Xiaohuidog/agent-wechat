@@ -151,10 +151,39 @@ fn extract_finder_source(content: &str, msg_type: i32) -> Option<FinderSourceCap
 }
 
 fn finder_info(source: &FinderSourceCapture) -> FinderInfo {
+    let feed = extract_xml_tag(&source.raw_xml, "finderFeed").unwrap_or_default();
+    let media = extract_xml_tag(&feed, "media").unwrap_or_default();
     FinderInfo {
         object_id: source.object_id.clone(),
         object_nonce_id: source.object_nonce_id.clone(),
+        title: extract_xml_tag(&feed, "desc"),
+        author: extract_xml_tag(&feed, "nickname"),
+        has_cover: extract_xml_tag(&media, "thumbUrl").is_some(),
+        has_playable: extract_xml_tag(&media, "url").is_some(),
+        duration_seconds: extract_xml_tag(&media, "videoPlayDuration")
+            .and_then(|value| value.parse::<u32>().ok()),
     }
+}
+
+pub(crate) fn finder_media_url(raw_xml: &str, kind: &str) -> Option<String> {
+    let feed = extract_xml_tag(raw_xml, "finderFeed")?;
+    let media = extract_xml_tag(&feed, "media")?;
+    let tag = match kind {
+        "cover" => "thumbUrl",
+        "playable" => "url",
+        _ => return None,
+    };
+    let value = extract_xml_tag(&media, tag)?;
+    let parsed = reqwest::Url::parse(&value).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str() != Some("wxapp.tc.qq.com")
+        || parsed.port().is_some()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return None;
+    }
+    Some(value)
 }
 
 fn valid_finder_identifier(value: &str, max_len: usize) -> bool {
@@ -496,7 +525,7 @@ pub fn list_messages(
 
 #[cfg(test)]
 mod tests {
-    use super::{clean_content, extract_finder_source, extract_group_sender, finder_info};
+    use super::{clean_content, extract_finder_source, extract_group_sender, finder_info, finder_media_url};
 
     #[test]
     fn extracts_finder_identifiers_without_changing_legacy_content() {
@@ -532,5 +561,22 @@ mod tests {
         assert_eq!(sender.as_deref(), Some("wxid_sender"));
         let source = extract_finder_source(&body, 49).expect("finder source");
         assert_eq!(source.raw_xml, xml);
+    }
+
+    #[test]
+    fn finder_share_exposes_description_author_and_media_availability() {
+        let xml = r#"<msg><appmsg><type>51</type><finderFeed><objectId>123456789</objectId><objectNonceId>nonce-123</objectNonceId><nickname><![CDATA[篮球作者]]></nickname><desc><![CDATA[篮球训练日记]]></desc><mediaList><media><thumbUrl><![CDATA[https://wxapp.tc.qq.com/cover]]></thumbUrl><url><![CDATA[http://wxapp.tc.qq.com/video]]></url><videoPlayDuration>31</videoPlayDuration></media></mediaList></finderFeed></appmsg></msg>"#;
+        let source = extract_finder_source(xml, 49).expect("finder source");
+        let finder = finder_info(&source);
+        assert_eq!(finder.title.as_deref(), Some("篮球训练日记"));
+        assert_eq!(finder.author.as_deref(), Some("篮球作者"));
+        assert!(finder.has_cover);
+        assert!(finder.has_playable);
+        assert_eq!(finder.duration_seconds, Some(31));
+        assert_eq!(finder_media_url(xml, "cover").as_deref(), Some("https://wxapp.tc.qq.com/cover"));
+        assert_eq!(finder_media_url(xml, "playable").as_deref(), Some("http://wxapp.tc.qq.com/video"));
+        assert!(finder_media_url(xml, "unknown").is_none());
+        let hostile = xml.replace("http://wxapp.tc.qq.com/video", "https://wxapp.tc.qq.com.evil.test/video");
+        assert!(finder_media_url(&hostile, "playable").is_none());
     }
 }

@@ -368,15 +368,21 @@ def copy_viewer_image(preview_path):
         raise DownloadError("IMAGE_VIEWER_NOT_OPEN")
     command("xdotool", "key", "--clearmodifiers", "ctrl+c")
     deadline = time.monotonic() + 10
+    invalid_image_seen = False
     while time.monotonic() < deadline:
         copied = subprocess.run(
             ["xclip", "-selection", "clipboard", "-t", "image/png", "-o"],
             capture_output=True, timeout=5, check=False,
         )
         if copied.returncode == 0 and copied.stdout:
-            return publish_clipboard_image(copied.stdout, preview_path)
+            try:
+                return publish_clipboard_image(copied.stdout, preview_path)
+            except DownloadError as error:
+                if str(error) != "IMAGE_CLIPBOARD_INVALID":
+                    raise
+                invalid_image_seen = True
         time.sleep(0.3)
-    raise DownloadError("IMAGE_CLIPBOARD_UNAVAILABLE")
+    raise DownloadError("IMAGE_CLIPBOARD_INVALID" if invalid_image_seen else "IMAGE_CLIPBOARD_UNAVAILABLE")
 
 
 def parse_args():

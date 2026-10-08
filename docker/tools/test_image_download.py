@@ -5,6 +5,7 @@ import pathlib
 import tempfile
 import threading
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from PIL import Image
@@ -139,6 +140,25 @@ class NativeImageSaveTest(unittest.TestCase):
             with self.assertRaisesRegex(image_download.DownloadError, "IMAGE_CLIPBOARD_INVALID"):
                 image_download.publish_clipboard_image(b"not an image", target)
             self.assertFalse(target.exists())
+
+    def test_waits_past_invalid_clipboard_response_for_viewer_image(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = pathlib.Path(directory) / "image-a_preview.jpg"
+            encoded = io.BytesIO()
+            Image.new("RGB", (80, 60), "#19a7c0").save(encoded, "PNG")
+            clipboard = iter([
+                SimpleNamespace(returncode=0, stdout=b"clipboard-not-ready"),
+                SimpleNamespace(returncode=0, stdout=encoded.getvalue()),
+            ])
+            active = SimpleNamespace(stdout="Photos and Videos")
+            with patch.object(image_download, "command", return_value=active), \
+                 patch.object(image_download.subprocess, "run", side_effect=lambda *_args, **_kwargs: next(clipboard)), \
+                 patch.object(image_download.time, "sleep"):
+                size = image_download.copy_viewer_image(target)
+
+            self.assertGreater(size, 0)
+            with Image.open(target) as saved:
+                self.assertEqual(saved.size, (80, 60))
 
     def test_native_path_is_bound_to_source_file_hash(self):
         stem = "b" * 32

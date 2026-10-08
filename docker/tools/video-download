@@ -2,6 +2,7 @@
 """Trigger one identity-matched native WeChat group-video download."""
 
 import argparse
+import hashlib
 import importlib.machinery
 import importlib.util
 import json
@@ -65,7 +66,20 @@ def find_unique_video_match(screenshot, target, rows, threshold=0.18):
     return matches[0]
 
 
-def valid_video(path):
+def unique_accessibility_video_match(rows, expected_md5):
+    # WeChat can expose the selected chat and its video row while leaving the
+    # message pane visually blank. Only one visible video row plus the source
+    # message's MD5 is strong enough to try a native click in that state.
+    if not expected_md5 or len(rows) != 1:
+        raise DownloadError("VIDEO_CARD_NOT_FOUND")
+    bounds = rows[0]["bounds"]
+    return {
+        "x": round(float(bounds["x"]) + min(120, float(bounds["width"]) / 2)),
+        "y": round(float(bounds["y"]) + float(bounds["height"]) / 2),
+    }
+
+
+def valid_video(path, expected_md5=""):
     try:
         size = path.stat().st_size
         if size < 1024 or size > 100 * 1024 * 1024:
@@ -78,6 +92,13 @@ def valid_video(path):
             "-show_entries", "stream=codec_name", "-of", "json", str(path),
         ], capture_output=True, text=True, timeout=15)
         if probe.returncode == 0 and json.loads(probe.stdout).get("streams"):
+            if expected_md5:
+                digest = hashlib.md5()
+                with path.open("rb") as source:
+                    for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                if digest.hexdigest() != expected_md5:
+                    return None
             return size
     except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
         pass
@@ -92,6 +113,7 @@ def parse_args():
     parser.add_argument("--video-dir", required=True)
     parser.add_argument("--stem", required=True)
     parser.add_argument("--thumbnail", required=True)
+    parser.add_argument("--expected-md5", default="")
     return parser.parse_args()
 
 
@@ -104,9 +126,11 @@ def main():
         image_helper.fail("VIDEO_TARGET_PATH_INVALID")
     if not re.fullmatch(r"/tmp/agent-video-[0-9a-f-]+\.jpg", args.thumbnail):
         image_helper.fail("VIDEO_TARGET_PATH_INVALID")
+    if args.expected_md5 and not re.fullmatch(r"[0-9a-f]{32}", args.expected_md5):
+        image_helper.fail("VIDEO_MESSAGE_MD5_INVALID")
     mp4_path = video_dir / f"{args.stem}.mp4"
     try:
-        size = valid_video(mp4_path)
+        size = valid_video(mp4_path, args.expected_md5)
         if size is not None:
             print(json.dumps({"ok": True, "sizeBytes": size}))
             return
@@ -123,13 +147,18 @@ def main():
         rows = video_rows(image_helper.tree(), geometry)
         try:
             with Image.open(args.thumbnail) as thumbnail:
-                match = find_unique_video_match(image_helper.capture(), thumbnail.convert("RGB"), rows)
+                try:
+                    match = find_unique_video_match(image_helper.capture(), thumbnail.convert("RGB"), rows)
+                except DownloadError as error:
+                    if str(error) != "VIDEO_CARD_NOT_FOUND":
+                        raise
+                    match = unique_accessibility_video_match(rows, args.expected_md5)
         except (FileNotFoundError, OSError) as error:
             raise DownloadError("VIDEO_THUMBNAIL_MISSING") from error
         image_helper.command("xdotool", "mousemove", str(match["x"]), str(match["y"]), "click", "1")
-        deadline = time.monotonic() + 60
+        deadline = time.monotonic() + 90
         while time.monotonic() < deadline:
-            size = valid_video(mp4_path)
+            size = valid_video(mp4_path, args.expected_md5)
             if size is not None:
                 print(json.dumps({"ok": True, "sizeBytes": size}))
                 return

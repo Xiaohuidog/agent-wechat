@@ -5,6 +5,7 @@ use axum::{
     Json,
 };
 use base64::Engine;
+use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -105,6 +106,14 @@ fn finish_ready(id: &str, size_bytes: i64) {
     }
 }
 
+fn video_bytes_match_message(bytes: &[u8], expected_md5: Option<&str>) -> bool {
+    bytes.len() >= 12
+        && &bytes[4..8] == b"ftyp"
+        && expected_md5
+            .map(|expected| format!("{:x}", Md5::digest(bytes)) == expected)
+            .unwrap_or(true)
+}
+
 fn schedule(id: String) {
     tokio::spawn(async move { run(id).await });
 }
@@ -171,6 +180,7 @@ async fn run(id: String) {
     }
     let local_id_string = operation.local_id.to_string();
     let video_dir_string = target.video_dir.to_string_lossy().to_string();
+    let expected_md5 = target.expected_md5.as_deref().unwrap_or("");
     let args = [
         "--chat-id",
         operation.chat_id.as_str(),
@@ -184,11 +194,13 @@ async fn run(id: String) {
         target.stem.as_str(),
         "--thumbnail",
         temporary_thumb.as_str(),
+        "--expected-md5",
+        expected_md5,
     ];
     update_state(&id, "triggering", None);
     let options = ExecOptions {
         session: Some(session),
-        timeout_ms: 120_000,
+        timeout_ms: 180_000,
     };
     let result = exec_command("/opt/tools/video-download", &args, &options).await;
     let _ = std::fs::remove_file(&temporary_thumb);
@@ -214,7 +226,7 @@ async fn run(id: String) {
                     .decode(encoded)
                     .ok()
             })
-            .filter(|bytes| bytes.len() >= 12 && &bytes[4..8] == b"ftyp")
+            .filter(|bytes| video_bytes_match_message(bytes, target.expected_md5.as_deref()))
             .map(|bytes| bytes.len() as i64)
             .unwrap_or(0)
     } else {
@@ -304,5 +316,13 @@ mod tests {
             ..valid
         };
         assert_eq!(validate(&invalid), Err("VIDEO_DOWNLOAD_MESSAGE_ID_INVALID"));
+    }
+
+    #[test]
+    fn rejects_a_video_file_with_a_different_message_md5() {
+        let bytes = b"\0\0\0\x18ftypisomvideo";
+        let digest = format!("{:x}", Md5::digest(bytes));
+        assert!(video_bytes_match_message(bytes, Some(&digest)));
+        assert!(!video_bytes_match_message(bytes, Some("00000000000000000000000000000000")));
     }
 }

@@ -26,6 +26,7 @@ pub struct ImageDownloadCacheTarget {
 pub struct VideoDownloadCacheTarget {
     pub video_dir: PathBuf,
     pub stem: String,
+    pub expected_md5: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -673,7 +674,7 @@ fn find_dat_via_timestamp(
 
 /// Resolve a video hash from files written at the message receive time when
 /// message_resource.db is unavailable. Multiple distinct hashes fail closed.
-fn find_unique_video_hash_by_time(video_dir: &Path, create_time: i64) -> Option<String> {
+fn video_hashes_by_time(video_dir: &Path, create_time: i64) -> Option<HashSet<String>> {
     const BEFORE_SECONDS: i64 = 5;
     const AFTER_SECONDS: i64 = 5;
 
@@ -713,10 +714,16 @@ fn find_unique_video_hash_by_time(video_dir: &Path, create_time: i64) -> Option<
         }
     }
 
-    if candidates.len() != 1 {
-        return None;
+    Some(candidates)
+}
+
+fn find_unique_video_hash_by_time(video_dir: &Path, create_time: i64) -> Option<String> {
+    let candidates = video_hashes_by_time(video_dir, create_time)?;
+    if candidates.len() == 1 {
+        candidates.into_iter().next()
+    } else {
+        None
     }
-    candidates.into_iter().next()
 }
 
 fn video_target_for_base(base: &Path, year_month: &str, hash: &str) -> Option<VideoDownloadCacheTarget> {
@@ -726,33 +733,73 @@ fn video_target_for_base(base: &Path, year_month: &str, hash: &str) -> Option<Vi
     Some(VideoDownloadCacheTarget {
         video_dir: base.join("msg/video").join(year_month),
         stem: hash.to_string(),
+        expected_md5: None,
     })
 }
 
-/// Only the message-resource DB is strong enough to authorize a UI video click.
-/// The timestamp fallback used by media previews is deliberately excluded.
+fn video_download_target_from_cache(
+    bases: &[PathBuf],
+    year_month: &str,
+    create_time: i64,
+    resource_hash: Option<&str>,
+) -> Option<VideoDownloadCacheTarget> {
+    if let Some(hash) = resource_hash {
+        for base in bases {
+            let target = video_target_for_base(base, year_month, hash)?;
+            if video_target_has_cache_file(&target) {
+                return Some(target);
+            }
+        }
+        return None;
+    }
+
+    let mut matches = Vec::new();
+    for base in bases {
+        let video_dir = base.join("msg/video").join(year_month);
+        if !video_dir.is_dir() {
+            continue;
+        }
+        for hash in video_hashes_by_time(&video_dir, create_time)? {
+            let target = video_target_for_base(base, year_month, &hash)?;
+            if video_target_has_cache_file(&target) {
+                matches.push(target);
+            }
+        }
+    }
+    if matches.len() == 1 {
+        matches.pop()
+    } else {
+        None
+    }
+}
+
+fn video_target_has_cache_file(target: &VideoDownloadCacheTarget) -> bool {
+    target.video_dir.join(format!("{}_thumb.jpg", target.stem)).is_file()
+        || target.video_dir.join(format!("{}.jpg", target.stem)).is_file()
+        || target.video_dir.join(format!("{}.mp4", target.stem)).is_file()
+}
+
+/// Use the resource mapping when present. A unique cache thumbnail written at
+/// the message time is also usable: the UI downloader verifies that thumbnail
+/// inside the exact chat before it clicks the video card.
 pub fn get_video_download_cache_target(
     account_dir: &str,
     keys: &HashMap<String, String>,
     chat_id: &str,
     local_id: i64,
 ) -> Option<VideoDownloadCacheTarget> {
-    let (local_type, create_time, _) = lookup_message_raw(account_dir, keys, chat_id, local_id)?;
+    let (local_type, create_time, content) = lookup_message_raw(account_dir, keys, chat_id, local_id)?;
     if (local_type & 0xFFFF_FFFF) as i32 != 43 {
         return None;
     }
-    let hash = find_file_hash_via_resource_db(account_dir, keys, chat_id, local_id)?;
+    let hash = find_file_hash_via_resource_db(account_dir, keys, chat_id, local_id);
     let year_month = chrono::DateTime::from_timestamp(create_time, 0)?.format("%Y-%m").to_string();
-    for base in account_base_paths(account_dir) {
-        let target = video_target_for_base(Path::new(&base), &year_month, &hash)?;
-        if target.video_dir.join(format!("{}_thumb.jpg", target.stem)).is_file()
-            || target.video_dir.join(format!("{}.jpg", target.stem)).is_file()
-            || target.video_dir.join(format!("{}.mp4", target.stem)).is_file()
-        {
-            return Some(target);
-        }
-    }
-    None
+    let bases: Vec<PathBuf> = account_base_paths(account_dir).into_iter().map(PathBuf::from).collect();
+    let mut target = video_download_target_from_cache(&bases, &year_month, create_time, hash.as_deref())?;
+    target.expected_md5 = xml_attr(&content, "md5")
+        .filter(|value| value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .map(|value| value.to_ascii_lowercase());
+    Some(target)
 }
 
 /// Resolve the exact image cache identity that a UI fetch must upgrade.
@@ -1408,7 +1455,8 @@ mod timestamp_fallback_tests {
     use super::{
         find_best_image_dat, find_unique_dat_by_time, find_unique_video_hash_by_time,
         get_saved_image_preview, get_saved_image_preview_from_target, image_dat_variant_path,
-        image_download_cache_target, image_filename, video_target_for_base,
+        image_download_cache_target, image_filename, video_download_target_from_cache,
+        video_target_for_base,
         ImageDatVariant, ImageDownloadCacheTarget,
     };
     use std::fs;
@@ -1555,6 +1603,61 @@ mod timestamp_fallback_tests {
         assert_eq!(target.video_dir, base.join("msg/video/2026-09"));
         assert_eq!(target.stem, "dc56ab6e1f2966add09194099ade5c3c");
         assert!(video_target_for_base(base, "2026-09", "../wrong").is_none());
+    }
+
+    #[test]
+    fn video_download_target_recovers_the_only_new_thumbnail_without_resource_row() {
+        let temporary = TempDir::new().unwrap();
+        let video_dir = temporary.path().join("msg/video/2026-10");
+        fs::create_dir_all(&video_dir).unwrap();
+        fs::write(
+            video_dir.join("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_thumb.jpg"),
+            b"thumbnail",
+        )
+        .unwrap();
+        let target = video_download_target_from_cache(
+            &[temporary.path().to_path_buf()],
+            "2026-10",
+            now_seconds(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(target.video_dir, video_dir);
+        assert_eq!(target.stem, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    }
+
+    #[test]
+    fn video_download_target_rejects_ambiguous_recent_thumbnails() {
+        let temporary = TempDir::new().unwrap();
+        let video_dir = temporary.path().join("msg/video/2026-10");
+        fs::create_dir_all(&video_dir).unwrap();
+        for hash in ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"] {
+            fs::write(video_dir.join(format!("{hash}_thumb.jpg")), b"thumbnail").unwrap();
+        }
+        assert!(video_download_target_from_cache(
+            &[temporary.path().to_path_buf()],
+            "2026-10",
+            now_seconds(),
+            None,
+        ).is_none());
+    }
+
+    #[test]
+    fn video_download_target_prefers_the_resource_hash_when_recent_files_are_ambiguous() {
+        let temporary = TempDir::new().unwrap();
+        let video_dir = temporary.path().join("msg/video/2026-10");
+        fs::create_dir_all(&video_dir).unwrap();
+        for hash in ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"] {
+            fs::write(video_dir.join(format!("{hash}_thumb.jpg")), b"thumbnail").unwrap();
+        }
+        let target = video_download_target_from_cache(
+            &[temporary.path().to_path_buf()],
+            "2026-10",
+            now_seconds(),
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        )
+        .unwrap();
+        assert_eq!(target.stem, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
     }
 
     #[test]

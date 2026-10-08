@@ -60,6 +60,24 @@ class ImageMatchTest(unittest.TestCase):
         with self.assertRaisesRegex(image_download.DownloadError, "IMAGE_CARD_NOT_FOUND"):
             image_download.find_unique_match(screenshot, self.target, rows)
 
+    def test_scrolls_up_to_match_latest_image_hidden_above_newer_video(self):
+        screenshot = Image.new("RGB", (800, 600), "#eeeeee")
+        screenshot.paste(self.target.resize((80, 120)), (180, 350))
+        hidden = {"role": "list-item", "name": "Image", "bounds": {"x": 100, "y": -35, "width": 600, "height": 160}}
+        visible = {"role": "list-item", "name": "Image", "bounds": {"x": 100, "y": 330, "width": 600, "height": 160}}
+        trees = iter([{"children": [hidden]}, {"children": [visible]}])
+        commands = []
+        geometry = {"X": 0, "Y": 0, "WIDTH": 800, "HEIGHT": 600}
+
+        with patch.object(image_download, "tree", side_effect=lambda: next(trees)), \
+             patch.object(image_download, "capture", return_value=screenshot), \
+             patch.object(image_download, "command", side_effect=lambda *args: commands.append(args)), \
+             patch.object(image_download.time, "sleep"):
+            match = image_download.find_image_match_in_chat(self.target, geometry)
+
+        self.assertEqual(match["row"], visible)
+        self.assertTrue(any(args[-1] == "4" for args in commands))
+
     def test_clicks_image_content_not_center_of_full_width_message_row(self):
         row = {"bounds": {"x": 423, "y": 472, "width": 704, "height": 121}}
 

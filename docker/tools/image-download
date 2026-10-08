@@ -161,6 +161,24 @@ def find_unique_match(screenshot, target, rows, threshold=0.18):
     return match
 
 
+def find_image_match_in_chat(target, geometry):
+    scroll_x = round(geometry["X"] + geometry["WIDTH"] * 0.72)
+    scroll_y = round(geometry["Y"] + geometry["HEIGHT"] * 0.50)
+    for attempt in range(9):
+        rows = image_rows(tree(), geometry)
+        if rows:
+            try:
+                return find_unique_match(capture(), target, rows)
+            except DownloadError as error:
+                if str(error) != "IMAGE_CARD_NOT_FOUND":
+                    raise
+        if attempt < 8:
+            command("xdotool", "mousemove", str(scroll_x), str(scroll_y),
+                    "click", "--repeat", "3", "--delay", "70", "4")
+            time.sleep(0.3)
+    raise DownloadError("IMAGE_CARD_NOT_FOUND")
+
+
 def weixin_geometry():
     result = command("xdotool", "search", "--onlyvisible", "--name", "^Weixin$")
     ids = [value for value in result.stdout.splitlines() if value.isdigit()]
@@ -432,13 +450,11 @@ def main():
         scroll_y = round(geometry["Y"] + geometry["HEIGHT"] * 0.50)
         command("xdotool", "mousemove", str(scroll_x), str(scroll_y), "click", "--repeat", "10", "--delay", "50", "5")
         time.sleep(0.8)
-        current_tree = tree()
-        rows = image_rows(current_tree, geometry)
         if args.thumbnail:
-            screenshot = capture()
             with Image.open(args.thumbnail) as target_image:
-                match = find_unique_match(screenshot, target_image.convert("RGB"), rows)
+                match = find_image_match_in_chat(target_image.convert("RGB"), geometry)
         else:
+            rows = image_rows(tree(), geometry)
             if not rows:
                 raise DownloadError("IMAGE_CARD_NOT_FOUND")
             row = max(rows, key=lambda value: float(value["bounds"]["y"]))

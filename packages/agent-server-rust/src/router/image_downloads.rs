@@ -17,7 +17,7 @@ use crate::tools::wechat_media::get_image_download_cache_target;
 use crate::tools::wechat_messages::latest_image_local_id;
 
 const ACTIVE_TIMEOUT: &str = "-10 minutes";
-const MAX_ATTEMPTS: i64 = 2;
+const MAX_ATTEMPTS: i64 = 5;
 const RESETTABLE_ERRORS: [&str; 2] = ["IMAGE_NOT_LATEST_MESSAGE", "IMAGE_DOWNLOAD_UI_FAILED"];
 
 #[derive(Debug, Deserialize)]
@@ -37,6 +37,7 @@ pub struct Operation {
     local_id: i64,
     state: String,
     attempts: i64,
+    max_attempts: i64,
     error_code: Option<String>,
     size_bytes: Option<i64>,
     created_at: String,
@@ -86,6 +87,7 @@ fn load_operation(id: &str) -> Option<Operation> {
                 local_id: row.get(3)?,
                 state: row.get(4)?,
                 attempts: row.get(5)?,
+                max_attempts: MAX_ATTEMPTS,
                 error_code: row.get(6)?,
                 size_bytes: row.get(7)?,
                 created_at: row.get(8)?,
@@ -383,5 +385,20 @@ mod tests {
         assert!(is_resettable_error("IMAGE_NOT_LATEST_MESSAGE"));
         assert!(is_resettable_error("IMAGE_DOWNLOAD_UI_FAILED"));
         assert!(!is_resettable_error("IMAGE_CARD_NOT_FOUND"));
+    }
+
+    #[test]
+    fn reports_image_retry_limit_to_clients() {
+        let operation = Operation {
+            id: "op-1".into(), idempotency_key: "key-1".into(),
+            chat_id: "group@chatroom".into(), local_id: 42,
+            state: "failed".into(), attempts: 2,
+            max_attempts: MAX_ATTEMPTS,
+            error_code: Some("IMAGE_CARD_NOT_FOUND".into()),
+            size_bytes: None, created_at: String::new(),
+            updated_at: String::new(), completed_at: None,
+        };
+        let serialized = serde_json::to_value(operation).unwrap();
+        assert_eq!(serialized["maxAttempts"], 5);
     }
 }

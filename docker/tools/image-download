@@ -60,7 +60,7 @@ def tree():
         raise DownloadError("A11Y_RESPONSE_INVALID") from error
 
 
-def image_rows(value, geometry):
+def image_rows(value, geometry, safe_only=True):
     safe_top = geometry["Y"] + 70
     safe_bottom = geometry["Y"] + geometry["HEIGHT"] - 105
     rows = []
@@ -79,8 +79,7 @@ def image_rows(value, geometry):
             and width >= 500
             and height >= 60
             and x >= geometry["X"]
-            and y >= safe_top
-            and y + height <= safe_bottom
+            and (not safe_only or (y >= safe_top and y + height <= safe_bottom))
         ):
             rows.append(node)
     return rows
@@ -175,6 +174,31 @@ def find_image_match_in_chat(target, geometry):
         if attempt < 8:
             command("xdotool", "mousemove", str(scroll_x), str(scroll_y),
                     "click", "--repeat", "3", "--delay", "70", "4")
+            time.sleep(0.3)
+    raise DownloadError("IMAGE_CARD_NOT_FOUND")
+
+
+def find_newest_image_in_chat(geometry):
+    """Position the newest image row safely when WeChat has no thumbnail bytes."""
+    scroll_x = round(geometry["X"] + geometry["WIDTH"] * 0.72)
+    scroll_y = round(geometry["Y"] + geometry["HEIGHT"] * 0.50)
+    safe_top = geometry["Y"] + 70
+    safe_bottom = geometry["Y"] + geometry["HEIGHT"] - 105
+    for attempt in range(9):
+        rows = image_rows(tree(), geometry, safe_only=False)
+        if rows:
+            newest = max(rows, key=lambda row: float(row["bounds"]["y"]))
+            bounds = newest["bounds"]
+            top = float(bounds["y"])
+            bottom = top + float(bounds["height"])
+            if safe_top <= top and bottom <= safe_bottom:
+                return image_click_point(newest)
+            direction = "4" if top < safe_top else "5"
+        else:
+            direction = "4"
+        if attempt < 8:
+            command("xdotool", "mousemove", str(scroll_x), str(scroll_y),
+                    "click", "--repeat", "3", "--delay", "70", direction)
             time.sleep(0.3)
     raise DownloadError("IMAGE_CARD_NOT_FOUND")
 
@@ -454,11 +478,7 @@ def main():
             with Image.open(args.thumbnail) as target_image:
                 match = find_image_match_in_chat(target_image.convert("RGB"), geometry)
         else:
-            rows = image_rows(tree(), geometry)
-            if not rows:
-                raise DownloadError("IMAGE_CARD_NOT_FOUND")
-            row = max(rows, key=lambda value: float(value["bounds"]["y"]))
-            match = image_click_point(row)
+            match = find_newest_image_in_chat(geometry)
         cleared = subprocess.run(
             ["xclip", "-selection", "clipboard", "-i"],
             input=b"GROUPBOT_IMAGE_CLIPBOARD_SENTINEL",

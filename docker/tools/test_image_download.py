@@ -88,6 +88,20 @@ class ImageMatchTest(unittest.TestCase):
         self.assertGreaterEqual(point["y"], 499)
         self.assertLessEqual(point["y"], 580)
 
+    def test_without_thumbnail_scrolls_to_newest_image_instead_of_older_visible_card(self):
+        geometry = {"X": 100, "Y": 80, "WIDTH": 800, "HEIGHT": 640}
+        older = {"role": "list-item", "name": "Image", "bounds": {"x": 200, "y": 220, "width": 600, "height": 180}}
+        newest_clipped = {"role": "list-item", "name": "Image", "bounds": {"x": 200, "y": 430, "width": 600, "height": 250}}
+        newest_safe = {"role": "list-item", "name": "Image", "bounds": {"x": 200, "y": 230, "width": 600, "height": 250}}
+        trees = iter([{"children": [older, newest_clipped]}, {"children": [newest_safe]}])
+        commands = []
+        with patch.object(image_download, "tree", side_effect=lambda: next(trees)), \
+             patch.object(image_download, "command", side_effect=lambda *args: commands.append(args)), \
+             patch.object(image_download.time, "sleep"):
+            point = image_download.find_newest_image_in_chat(geometry)
+        self.assertEqual(point, image_download.image_click_point(newest_safe))
+        self.assertTrue(any(call[-1] == "5" for call in commands))
+
 
 class NativeImageSaveTest(unittest.TestCase):
     def test_select_chat_searches_when_target_is_not_in_visible_list(self):

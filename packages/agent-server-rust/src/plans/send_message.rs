@@ -31,46 +31,42 @@ pub struct SendMessagePlanState {
 }
 
 fn find_edit_and_send_button(a11y: &A11yNode) -> Option<(&A11yNode, &A11yNode)> {
-    let send_btn = query_selector(a11y, r#"push-button[name="Send(S)"]"#)?;
-    // Find sibling EDITABLE text node via parent
-    // Since we don't have parent refs in the tree-based approach,
-    // we search the tree for the pattern
-    find_edit_near_send(a11y, send_btn)
-}
-
-fn find_edit_near_send<'a>(
-    root: &'a A11yNode,
-    _send_btn: &A11yNode,
-) -> Option<(&'a A11yNode, &'a A11yNode)> {
-    // Walk tree looking for a parent that has both an EDITABLE text and Send(S) button
-    find_edit_send_pair(root)
-}
-
-fn find_edit_send_pair(node: &A11yNode) -> Option<(&A11yNode, &A11yNode)> {
-    if let Some(children) = &node.children {
-        let send_btn = children.iter().find(|c| {
-            c.role == "push-button" && c.name == "Send(S)"
-        });
-        let edit_node = children.iter().find(|c| {
-            c.role == "text"
-                && c.states
-                    .as_ref()
-                    .map(|s| s.iter().any(|st| st == "EDITABLE"))
-                    .unwrap_or(false)
-        });
-
-        if let (Some(edit), Some(send)) = (edit_node, send_btn) {
-            return Some((edit, send));
+    fn collect<'a>(node: &'a A11yNode, edits: &mut Vec<&'a A11yNode>, sends: &mut Vec<&'a A11yNode>) {
+        if node.role == "text"
+            && node.states.as_ref().is_some_and(|states| states.iter().any(|state| state == "EDITABLE"))
+        {
+            edits.push(node);
         }
-
-        // Recurse
-        for child in children {
-            if let Some(result) = find_edit_send_pair(child) {
-                return Some(result);
+        if node.role == "push-button" && matches!(node.name.as_str(), "Send" | "Send(S)") {
+            sends.push(node);
+        }
+        if let Some(children) = &node.children {
+            for child in children {
+                collect(child, edits, sends);
             }
         }
     }
-    None
+
+    let mut edits = Vec::new();
+    let mut sends = Vec::new();
+    collect(a11y, &mut edits, &mut sends);
+
+    let mut pairs = Vec::new();
+    for send in sends {
+        let Some(button) = &send.bounds else { continue };
+        for edit in &edits {
+            let Some(input) = &edit.bounds else { continue };
+            let horizontal_overlap = input.x <= button.x + button.width
+                && input.x + input.width >= button.x;
+            let vertical_distance = ((input.y + input.height / 2.0)
+                - (button.y + button.height / 2.0)).abs();
+            if horizontal_overlap && vertical_distance <= 140.0 {
+                pairs.push((*edit, send));
+            }
+        }
+    }
+    // Multiple matches are ambiguous: never type into an unverified control.
+    (pairs.len() == 1).then(|| pairs[0])
 }
 
 #[async_trait::async_trait]
@@ -265,5 +261,50 @@ impl Plan for SendMessagePlan {
                 SendMessagePhase::Done => return None,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_edit_and_send_button;
+    use crate::ia::types::A11yNode;
+    use serde_json::json;
+
+    #[test]
+    fn finds_nested_send_button_and_nearby_editor() {
+        let tree: A11yNode = serde_json::from_value(json!({
+            "role": "application", "name": "WeChat", "children": [
+                {"role": "text", "name": "", "states": ["EDITABLE"],
+                 "bounds": {"x": 299.0, "y": 126.0, "width": 148.0, "height": 22.0}},
+                {"role": "filler", "name": "", "children": [
+                    {"role": "text", "name": "", "states": ["EDITABLE", "FOCUSED"],
+                     "bounds": {"x": 521.0, "y": 588.0, "width": 542.0, "height": 79.0}},
+                    {"role": "tool-bar", "name": "", "children": [
+                        {"role": "filler", "name": "", "children": [
+                            {"role": "push-button", "name": "Send", "states": ["DISABLED"],
+                             "bounds": {"x": 1004.0, "y": 677.0, "width": 55.0, "height": 24.0}}
+                        ]}
+                    ]}
+                ]}
+            ]
+        })).unwrap();
+
+        let (edit, send) = find_edit_and_send_button(&tree).unwrap();
+        assert_eq!(edit.bounds.as_ref().unwrap().y, 588.0);
+        assert_eq!(send.name, "Send");
+    }
+
+    #[test]
+    fn rejects_unrelated_search_editor() {
+        let tree: A11yNode = serde_json::from_value(json!({
+            "role": "application", "name": "WeChat", "children": [
+                {"role": "text", "name": "", "states": ["EDITABLE"],
+                 "bounds": {"x": 299.0, "y": 126.0, "width": 148.0, "height": 22.0}},
+                {"role": "push-button", "name": "Send", "states": ["DISABLED"],
+                 "bounds": {"x": 1004.0, "y": 677.0, "width": 55.0, "height": 24.0}}
+            ]
+        })).unwrap();
+
+        assert!(find_edit_and_send_button(&tree).is_none());
     }
 }

@@ -264,6 +264,8 @@ mod file_media_tests {
 pub struct SendParams {
     #[serde(rename = "chatId")]
     chat_id: String,
+    #[serde(rename = "chatName")]
+    chat_name: Option<String>,
     text: Option<String>,
     image: Option<ImageInput>,
     file: Option<FileInput>,
@@ -370,6 +372,7 @@ pub async fn send_message(Json(input): Json<SendParams>) -> Json<SendResult> {
     let plan = SendMessagePlan;
     let params = SendMessageParams {
         chat_id: input.chat_id,
+        chat_name: input.chat_name,
         message: input.text,
         image_path: image_path.clone(),
         image_mime,

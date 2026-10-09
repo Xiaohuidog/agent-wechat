@@ -9,6 +9,7 @@ pub struct SendMessagePlan;
 
 pub struct SendMessageParams {
     pub chat_id: String,
+    pub chat_name: Option<String>,
     pub message: Option<String>,
     pub image_path: Option<String>,
     pub image_mime: Option<String>,
@@ -126,7 +127,7 @@ impl Plan for SendMessagePlan {
                     });
 
                     let force = main_state_id == Some("chat");
-                    let result = open_chat(&params.chat_id, force, click_xy).await;
+                    let result = open_chat(&params.chat_id, params.chat_name.as_deref(), force, click_xy).await;
 
                     if !result.ok {
                         return None;

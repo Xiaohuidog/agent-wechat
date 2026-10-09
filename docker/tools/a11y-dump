@@ -119,6 +119,8 @@ def dump_tree_nested(max_depth=30):
         try:
             role = node.get_role_name().replace(" ", "-")
             name = node.get_name() or ""
+            if depth == 1 and role == "application" and name.lower() not in {"wechat", "weixin"}:
+                return None
             bounds = get_bounds(node)
 
             # Skip elements with no bounds (invisible) unless top-level
@@ -187,6 +189,8 @@ def dump_tree_aria(max_depth=30):
         try:
             role = node.get_role_name().replace(" ", "-")
             name = node.get_name() or ""
+            if depth == 1 and role == "application" and name.lower() not in {"wechat", "weixin"}:
+                return
             bounds = get_bounds(node)
             states = get_states(node)
 

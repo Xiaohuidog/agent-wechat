@@ -19,6 +19,7 @@ pub struct OpenChatResult {
 /// Args format: chat-select [--force] [--click-xy X Y] <username>
 pub async fn open_chat(
     chat_id: &str,
+    chat_name: Option<&str>,
     force: bool,
     click_xy: Option<(f64, f64)>,
 ) -> OpenChatResult {
@@ -26,6 +27,11 @@ pub async fn open_chat(
 
     if force {
         args.push("--force".into());
+    }
+
+    if let Some(name) = chat_name.filter(|name| !name.trim().is_empty()) {
+        args.push("--chat-name".into());
+        args.push(name.trim().into());
     }
 
     if let Some((x, y)) = click_xy {

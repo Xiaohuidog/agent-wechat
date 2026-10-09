@@ -88,6 +88,25 @@ class ImageMatchTest(unittest.TestCase):
         self.assertGreaterEqual(point["y"], 499)
         self.assertLessEqual(point["y"], 580)
 
+    def test_clicks_right_aligned_image_sent_by_logged_in_user(self):
+        row = {"bounds": {"x": 501, "y": 308, "width": 578, "height": 160}}
+
+        self.assertEqual(image_download.image_click_point(row, side="right"), {"x": 999, "y": 388})
+
+    def test_reads_image_side_from_agent_message_identity(self):
+        payload = [{"localId": 121, "isSelf": True}]
+        response = io.BytesIO(__import__("json").dumps(payload).encode())
+        with patch.object(image_download.pathlib.Path, "read_text", return_value="token"), \
+             patch.object(image_download.urllib.request, "urlopen", return_value=response):
+            side = image_download.image_message_side("group@chatroom", 121)
+        self.assertEqual(side, "right")
+
+    def test_xdotool_error_identifies_failed_subcommand(self):
+        failure = SimpleNamespace(returncode=1, stdout="", stderr="window vanished")
+        with patch.object(image_download.subprocess, "run", return_value=failure):
+            with self.assertRaisesRegex(image_download.DownloadError, "XDOTOOL_MOUSEMOVE_FAILED"):
+                image_download.command("xdotool", "mousemove", "100", "200", "click", "1")
+
     def test_without_thumbnail_scrolls_to_newest_image_instead_of_older_visible_card(self):
         geometry = {"X": 100, "Y": 80, "WIDTH": 800, "HEIGHT": 640}
         older = {"role": "list-item", "name": "Image", "bounds": {"x": 200, "y": 220, "width": 600, "height": 180}}

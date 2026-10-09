@@ -11,6 +11,8 @@ import shutil
 import subprocess
 import tempfile
 import time
+import urllib.parse
+import urllib.request
 
 from PIL import Image
 
@@ -28,18 +30,30 @@ def fail(code):
 
 def command(*args, timeout=15, check=True):
     name = os.path.basename(str(args[0])).upper().replace("-", "_")
-    try:
-        result = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
-    except subprocess.TimeoutExpired as error:
-        raise DownloadError(f"{name}_TIMEOUT") from error
-    if check and result.returncode != 0:
+    subcommand = str(args[1]).upper().replace("-", "_") if name == "XDOTOOL" and len(args) > 1 else None
+    code_prefix = f"{name}_{subcommand}" if subcommand else name
+    retryable = name == "XDOTOOL" and subcommand in {
+        "SEARCH", "GETACTIVEWINDOW", "GETWINDOWGEOMETRY", "WINDOWACTIVATE"
+    }
+    for attempt in range(3 if check and retryable else 1):
+        try:
+            result = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
+        except subprocess.TimeoutExpired as error:
+            if retryable and attempt < 2:
+                time.sleep(0.5)
+                continue
+            raise DownloadError(f"{code_prefix}_TIMEOUT") from error
+        if not check or result.returncode == 0:
+            return result
         try:
             payload = json.loads(result.stdout)
         except json.JSONDecodeError:
             payload = {}
         code = payload.get("errorCode") if isinstance(payload, dict) else None
-        raise DownloadError(code or f"{name}_FAILED")
-    return result
+        if retryable and attempt < 2:
+            time.sleep(0.5)
+            continue
+        raise DownloadError(code or f"{code_prefix}_FAILED")
 
 
 def walk(value):
@@ -85,14 +99,44 @@ def image_rows(value, geometry, safe_only=True):
     return rows
 
 
-def image_click_point(row):
+def image_click_point(row, side="left"):
     bounds = row["bounds"]
     # Accessibility exposes the full chat-width row, while the image itself
-    # is left-aligned inside it; clicking the row center misses the image.
+    # occupies one side of it; clicking the row center misses the image.
+    width = float(bounds["width"])
+    x = (float(bounds["x"]) + width - min(80, width / 2)
+         if side == "right" else float(bounds["x"]) + min(180, width / 2))
     return {
-        "x": round(float(bounds["x"]) + min(180, float(bounds["width"]) / 2)),
+        "x": round(x),
         "y": round(float(bounds["y"]) + float(bounds["height"]) / 2),
     }
+
+
+def image_message_side(chat_id, local_id):
+    """Use the Agent's message identity to avoid guessing a self-image's side."""
+    try:
+        token = pathlib.Path("/data/auth-token").read_text().strip()
+        if not token:
+            raise ValueError("empty token")
+        quoted_chat = urllib.parse.quote(chat_id, safe="")
+        for offset in range(0, 1000, 200):
+            url = f"http://127.0.0.1:6174/api/messages/{quoted_chat}?limit=200&offset={offset}"
+            request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+            with urllib.request.urlopen(request, timeout=15) as response:
+                payload = json.load(response)
+            rows = payload if isinstance(payload, list) else payload.get("messages")
+            if not isinstance(rows, list):
+                break
+            for row in rows:
+                if isinstance(row, dict) and row.get("localId") == local_id:
+                    if isinstance(row.get("isSelf"), bool):
+                        return "right" if row["isSelf"] else "left"
+                    raise DownloadError("IMAGE_SENDER_UNAVAILABLE")
+            if len(rows) < 200:
+                break
+    except (OSError, ValueError, TypeError) as error:
+        raise DownloadError("IMAGE_SENDER_UNAVAILABLE") from error
+    raise DownloadError("IMAGE_SENDER_UNAVAILABLE")
 
 
 def _normalized_difference(left, right):
@@ -178,7 +222,7 @@ def find_image_match_in_chat(target, geometry):
     raise DownloadError("IMAGE_CARD_NOT_FOUND")
 
 
-def find_newest_image_in_chat(geometry):
+def find_newest_image_in_chat(geometry, side="left"):
     """Position the newest image row safely when WeChat has no thumbnail bytes."""
     scroll_x = round(geometry["X"] + geometry["WIDTH"] * 0.72)
     scroll_y = round(geometry["Y"] + geometry["HEIGHT"] * 0.50)
@@ -192,7 +236,7 @@ def find_newest_image_in_chat(geometry):
             top = float(bounds["y"])
             bottom = top + float(bounds["height"])
             if safe_top <= top and bottom <= safe_bottom:
-                return image_click_point(newest)
+                return image_click_point(newest, side=side)
             direction = "4" if top < safe_top else "5"
         else:
             direction = "4"
@@ -204,8 +248,15 @@ def find_newest_image_in_chat(geometry):
 
 
 def weixin_geometry():
-    result = command("xdotool", "search", "--onlyvisible", "--name", "^Weixin$")
-    ids = [value for value in result.stdout.splitlines() if value.isdigit()]
+    deadline = time.monotonic() + 20
+    ids = []
+    while not ids and time.monotonic() < deadline:
+        result = command("xdotool", "search", "--onlyvisible", "--name", "^Weixin$", check=False)
+        ids = [value for value in result.stdout.splitlines() if value.isdigit()]
+        if not ids:
+            time.sleep(0.5)
+    if not ids:
+        raise DownloadError("WEIXIN_WINDOW_NOT_VISIBLE")
     candidates = []
     for window_id in ids:
         result = command("xdotool", "getwindowgeometry", "--shell", window_id, check=False)
@@ -478,7 +529,8 @@ def main():
             with Image.open(args.thumbnail) as target_image:
                 match = find_image_match_in_chat(target_image.convert("RGB"), geometry)
         else:
-            match = find_newest_image_in_chat(geometry)
+            side = image_message_side(args.chat_id, args.local_id)
+            match = find_newest_image_in_chat(geometry, side=side)
         cleared = subprocess.run(
             ["xclip", "-selection", "clipboard", "-i"],
             input=b"GROUPBOT_IMAGE_CLIPBOARD_SENTINEL",

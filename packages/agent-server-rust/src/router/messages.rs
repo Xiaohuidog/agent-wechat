@@ -328,38 +328,22 @@ pub async fn send_message(Json(input): Json<SendParams>) -> Json<SendResult> {
         }
     }
 
-    // Decode base64 file to temp file
+    // Stage the upload under its exact filename so WeChat uses that name for the file card.
     let mut file_path: Option<String> = None;
     if let Some(ref f) = input.file {
-        // Sanitize filename: keep ASCII alphanumerics, dot, hyphen, underscore;
-        // replace everything else (including CJK) with underscore so the temp
-        // path stays portable across locales.  The dot is preserved so that
-        // file extensions survive (e.g. "遗憾.pdf" → "__.pdf"); the mangled
-        // stem is acceptable since this is a transient temp path.
-        let safe_name: String = f.filename.chars().map(|c| {
-            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        }).collect();
-        let path = format!("/tmp/send_file_{}_{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis(), safe_name);
-        match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &f.data) {
-            Ok(bytes) => match std::fs::write(&path, &bytes) {
-                Ok(_) => { file_path = Some(path); }
-                Err(e) => {
-                    return Json(SendResult {
-                        success: false,
-                        error: Some(format!("Failed to write temp file: {e}")),
-                    });
-                }
-            },
+        let bytes = match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &f.data) {
+            Ok(bytes) => bytes,
             Err(e) => {
                 return Json(SendResult {
                     success: false,
                     error: Some(format!("Failed to decode base64 file data: {e}")),
                 });
+            }
+        };
+        match stage_outbound_file(&f.filename, &bytes) {
+            Ok(path) => { file_path = Some(path.to_string_lossy().into_owned()); }
+            Err(error) => {
+                return Json(SendResult { success: false, error: Some(error) });
             }
         }
     }
@@ -390,10 +374,48 @@ pub async fn send_message(Json(input): Json<SendParams>) -> Json<SendResult> {
     }
     if let Some(p) = &file_path {
         let _ = std::fs::remove_file(p);
+        if let Some(parent) = std::path::Path::new(p).parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
     }
 
     Json(SendResult {
         success: result.success,
         error: result.error,
     })
+}
+
+
+fn stage_outbound_file(filename: &str, bytes: &[u8]) -> Result<std::path::PathBuf, String> {
+    if filename.is_empty()
+        || matches!(filename, "." | "..")
+        || filename.len() > 240
+        || filename.contains('/')
+        || filename.contains('\\')
+        || filename.chars().any(char::is_control)
+    {
+        return Err("Invalid outbound filename".to_string());
+    }
+    let directory = std::env::temp_dir().join(format!("send_file_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&directory)
+        .map_err(|error| format!("Failed to create temp directory: {error}"))?;
+    let path = directory.join(filename);
+    if let Err(error) = std::fs::write(&path, bytes) {
+        let _ = std::fs::remove_dir(&directory);
+        return Err(format!("Failed to write temp file: {error}"));
+    }
+    Ok(path)
+}
+
+#[cfg(test)]
+mod outbound_filename_tests {
+    use super::stage_outbound_file;
+
+    #[test]
+    fn staged_file_keeps_the_uploaded_unicode_filename() {
+        let path = stage_outbound_file("《创始人行动手册》.pdf", b"%PDF-1.4").unwrap();
+        assert_eq!(path.file_name().unwrap(), "《创始人行动手册》.pdf");
+        assert_eq!(std::fs::read(&path).unwrap(), b"%PDF-1.4");
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
 }

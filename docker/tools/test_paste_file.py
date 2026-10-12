@@ -2,6 +2,7 @@
 
 import os
 import subprocess
+import time
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
@@ -35,6 +36,9 @@ def test_paste_file_keeps_unicode_basename_in_clipboard_uri(tmp_path: Path) -> N
             check=True,
         )
 
+    deadline = time.monotonic() + 2
+    while (not capture.exists() or capture.stat().st_size == 0) and time.monotonic() < deadline:
+        time.sleep(0.02)
     uri = capture.read_text()
     assert uri.isascii()
     assert unquote(urlsplit(uri).path) == str(original)

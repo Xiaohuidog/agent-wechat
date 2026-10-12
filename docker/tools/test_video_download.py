@@ -61,7 +61,7 @@ class VideoMatchTests(unittest.TestCase):
             patch.object(video_download, "parse_args", return_value=SimpleNamespace(
                 chat_id="53250352594@chatroom", chat_name="群测试", local_id=35,
                 video_dir="/home/wechat/xwechat_files/test/msg/video/2026-09",
-                stem="a" * 32, thumbnail="/tmp/agent-video-aabb.jpg",
+                stem="a" * 32, thumbnail="/tmp/agent-video-aabb.jpg", expected_md5="",
             )),
             patch.object(video_download, "valid_video", side_effect=[None, 2048]),
             patch.object(video_download.image_helper, "weixin_geometry", return_value={"X": 0, "Y": 0, "WIDTH": 900, "HEIGHT": 700}),

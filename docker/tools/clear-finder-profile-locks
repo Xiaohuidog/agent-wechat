@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+profile="${1:?profile path required}"
+lock="${profile}/SingletonLock"
+
+[[ -L "${lock}" ]] || exit 0
+target="$(readlink "${lock}")"
+lock_host="${target%-*}"
+lock_pid="${target##*-}"
+
+if [[ "${lock_host}" == "$(hostname)" && "${lock_pid}" =~ ^[0-9]+$ ]] \
+  && kill -0 "${lock_pid}" 2>/dev/null; then
+  exit 0
+fi
+
+for name in SingletonLock SingletonCookie SingletonSocket; do
+  if [[ -L "${profile}/${name}" ]]; then
+    rm -- "${profile}/${name}"
+  fi
+done

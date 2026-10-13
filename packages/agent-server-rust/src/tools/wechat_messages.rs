@@ -141,6 +141,7 @@ fn parse_app_card(content: &str, msg_type: i32) -> AppCard {
     let mut stack: Vec<&str> = Vec::new();
     let mut position = 0;
     let mut invalid = false;
+    let mut roots = 0;
     while position < content.len() {
         let rest = &content[position..];
         if rest.starts_with("<![CDATA[") {
@@ -204,6 +205,10 @@ fn parse_app_card(content: &str, msg_type: i32) -> AppCard {
                     invalid = true;
                     break;
                 }
+                if stack.is_empty() {
+                    roots += 1;
+                    if roots != 1 || name != "msg" { invalid = true; break; }
+                }
                 if !self_closing { stack.push(name); }
                 position += end + 1;
                 continue;
@@ -221,7 +226,7 @@ fn parse_app_card(content: &str, msg_type: i32) -> AppCard {
         position += end;
     }
     card.app_msg_type = fields.get("type").and_then(|value| value.trim().parse().ok());
-    card.malformed = invalid || !stack.is_empty() || card.app_msg_type.is_none();
+    card.malformed = invalid || roots != 1 || !stack.is_empty() || card.app_msg_type.is_none();
     if matches!(card.app_msg_type, Some(33 | 36)) && !card.malformed {
         let value = |key| fields.get(key).map(|text| decode_builtin_entities(text).trim().to_string()).filter(|text| !text.is_empty());
         card.mini_program = Some(MiniProgramInfo {

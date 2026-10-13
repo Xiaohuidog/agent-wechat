@@ -424,6 +424,7 @@ pub struct FinderInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct MiniProgramInfo {
     pub title: Option<String>,
     pub app_name: Option<String>,

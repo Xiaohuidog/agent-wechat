@@ -574,6 +574,7 @@ mod tests {
         assert_eq!(card.app_name.as_deref(), Some("福州地铁生活圈 Life"));
         assert_eq!(card.app_id.as_deref(), Some("wx123"));
         assert_eq!(card.page_path.as_deref(), Some("pages/home"));
+        assert!(super::extract_mini_program(&xml.replace("<type>33</type>", "<type>36</type>"), 49).is_some());
         assert!(super::extract_mini_program(&xml.replace("<type>33</type>", "<type>5</type>"), 49).is_none());
     }
 

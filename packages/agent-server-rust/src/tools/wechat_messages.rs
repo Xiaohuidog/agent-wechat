@@ -218,17 +218,18 @@ fn parse_app_card(content: &str, msg_type: i32) -> AppCard {
         }
         let end = rest.find('<').unwrap_or(rest.len());
         let value = &rest[..end];
-        if value.contains('&') && !valid_builtin_entities(value) {
+        if let Some(decoded) = decode_xml_entities(value) {
+            add_card_text(&stack, &decoded, &mut fields);
+        } else {
             invalid = true;
             break;
         }
-        add_card_text(&stack, value, &mut fields);
         position += end;
     }
     card.app_msg_type = fields.get("type").and_then(|value| value.trim().parse().ok());
     card.malformed = invalid || roots != 1 || !stack.is_empty() || card.app_msg_type.is_none();
     if matches!(card.app_msg_type, Some(33 | 36)) && !card.malformed {
-        let value = |key| fields.get(key).map(|text| decode_builtin_entities(text).trim().to_string()).filter(|text| !text.is_empty());
+        let value = |key| fields.get(key).map(|text| text.trim().to_string()).filter(|text| !text.is_empty());
         card.mini_program = Some(MiniProgramInfo {
             title: value("title"),
             app_name: value("sourcedisplayname"),
@@ -255,19 +256,25 @@ fn add_card_text(stack: &[&str], value: &str, fields: &mut HashMap<&'static str,
     if let Some(key) = key { fields.entry(key).or_default().push_str(value); }
 }
 
-fn valid_builtin_entities(value: &str) -> bool {
+fn decode_xml_entities(value: &str) -> Option<String> {
+    let mut decoded = String::with_capacity(value.len());
     let mut remaining = value;
     while let Some(start) = remaining.find('&') {
+        decoded.push_str(&remaining[..start]);
         remaining = &remaining[start + 1..];
-        let Some(end) = remaining.find(';') else { return false; };
-        if !matches!(&remaining[..end], "amp" | "lt" | "gt" | "quot" | "apos") { return false; }
+        let end = remaining.find(';')?;
+        let entity = &remaining[..end];
+        let character = match entity {
+            "amp" => '&', "lt" => '<', "gt" => '>', "quot" => '"', "apos" => '\'',
+            _ if entity.starts_with("#x") => char::from_u32(u32::from_str_radix(&entity[2..], 16).ok()?)?,
+            _ if entity.starts_with('#') => char::from_u32(entity[1..].parse().ok()?)?,
+            _ => return None,
+        };
+        decoded.push(character);
         remaining = &remaining[end + 1..];
     }
-    true
-}
-
-fn decode_builtin_entities(value: &str) -> String {
-    value.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'").replace("&amp;", "&")
+    decoded.push_str(remaining);
+    Some(decoded)
 }
 
 /// Extract the stable identifiers carried by a Finder share message.
@@ -601,7 +608,11 @@ pub fn list_messages(
             let app_msg_type = card.app_msg_type;
             let mini_program = card.mini_program;
             let card_parse_error = if card.malformed {
-                Some("MINI_PROGRAM_CARD_MALFORMED".to_string())
+                Some(if matches!(app_msg_type, Some(33 | 36)) {
+                    "MINI_PROGRAM_CARD_MALFORMED"
+                } else {
+                    "CARD_SUBTYPE_UNRECOGNIZED"
+                }.to_string())
             } else {
                 None
             };
@@ -715,6 +726,8 @@ mod tests {
         assert!(parsed.mini_program.is_none());
         assert!(parsed.malformed);
         assert!(super::parse_app_card("<!DOCTYPE msg><msg><appmsg><type>33</type></appmsg></msg>", 49).malformed);
+        let numeric = "<msg><appmsg><type>33</type><title>&#x798F;&#24030;</title></appmsg></msg>";
+        assert_eq!(super::parse_app_card(numeric, 49).mini_program.unwrap().title.as_deref(), Some("福州"));
     }
 
     #[test]

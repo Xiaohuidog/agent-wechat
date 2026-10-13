@@ -116,6 +116,10 @@ pub fn init_db() -> Result<(), String> {
         .run(&mut conn)
         .map_err(|e| format!("Failed to run migrations: {e}"))?;
 
+    // Keep the embedded migration version unchanged so the previous Agent remains bootable.
+    conn.execute_batch(include_str!("native_reply_operations.sql"))
+        .map_err(|e| format!("Failed to initialize native reply journal: {e}"))?;
+
     DB.set(Mutex::new(conn))
         .map_err(|_| "Database already initialized".to_string())?;
 

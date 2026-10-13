@@ -1,4 +1,4 @@
-CREATE TABLE native_reply_operations (
+CREATE TABLE IF NOT EXISTS native_reply_operations (
     request_key TEXT PRIMARY KEY,
     request_digest TEXT NOT NULL,
     status TEXT NOT NULL,

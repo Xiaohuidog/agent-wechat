@@ -1,5 +1,5 @@
 use super::wechat_db::{get_db_path, query_wechat_db};
-use crate::ia::types::{FinderInfo, Message, ReplyInfo};
+use crate::ia::types::{FinderInfo, Message, MiniProgramInfo, ReplyInfo};
 use md5::{Digest, Md5};
 use std::collections::HashMap;
 
@@ -117,6 +117,164 @@ fn clean_content(content: &str, msg_type: i32) -> String {
         }
         _ => content.to_string(),
     }
+}
+
+#[derive(Default)]
+struct AppCard {
+    app_msg_type: Option<i32>,
+    mini_program: Option<MiniProgramInfo>,
+    malformed: bool,
+}
+
+/// Parse only the app-message nodes we expose. The scanner validates nesting,
+/// refuses DTD/entity declarations, and never resolves external resources.
+fn parse_app_card(content: &str, msg_type: i32) -> AppCard {
+    let mut card = AppCard::default();
+    if (msg_type & 0x7FFFFFFF) != 49 {
+        return card;
+    }
+    if content.len() > 1024 * 1024 {
+        card.malformed = true;
+        return card;
+    }
+    let mut fields: HashMap<&'static str, String> = HashMap::new();
+    let mut stack: Vec<&str> = Vec::new();
+    let mut position = 0;
+    let mut invalid = false;
+    let mut roots = 0;
+    while position < content.len() {
+        let rest = &content[position..];
+        if rest.starts_with("<![CDATA[") {
+            if let Some(end) = rest[9..].find("]]>") {
+                add_card_text(&stack, &rest[9..9 + end], &mut fields);
+                position += 9 + end + 3;
+                continue;
+            }
+            invalid = true;
+            break;
+        }
+        if rest.starts_with("<!--") {
+            if let Some(end) = rest[4..].find("-->") {
+                position += 4 + end + 3;
+                continue;
+            }
+            invalid = true;
+            break;
+        }
+        if rest.starts_with("<?") {
+            if let Some(end) = rest[2..].find("?>") {
+                position += 2 + end + 2;
+                continue;
+            }
+            invalid = true;
+            break;
+        }
+        if rest.starts_with("<!") {
+            invalid = true;
+            break;
+        }
+        if rest.starts_with("</") {
+            if let Some(end) = rest.find('>') {
+                let name = rest[2..end].trim();
+                if stack.pop() != Some(name) {
+                    invalid = true;
+                    break;
+                }
+                position += end + 1;
+                continue;
+            }
+            invalid = true;
+            break;
+        }
+        if rest.starts_with('<') {
+            let mut quote = None;
+            let mut end = None;
+            for (offset, byte) in rest.as_bytes().iter().enumerate().skip(1) {
+                match (*byte, quote) {
+                    (b'\'', None) | (b'"', None) => quote = Some(*byte),
+                    (value, Some(open)) if value == open => quote = None,
+                    (b'>', None) => { end = Some(offset); break; }
+                    _ => {}
+                }
+            }
+            if let Some(end) = end {
+                let inside = rest[1..end].trim();
+                let self_closing = inside.ends_with('/');
+                let name = inside.trim_end_matches('/').split_whitespace().next().unwrap_or("");
+                if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b':')) || stack.len() >= 32 {
+                    invalid = true;
+                    break;
+                }
+                if stack.is_empty() {
+                    roots += 1;
+                    if roots != 1 || name != "msg" { invalid = true; break; }
+                }
+                if !self_closing { stack.push(name); }
+                position += end + 1;
+                continue;
+            }
+            invalid = true;
+            break;
+        }
+        let end = rest.find('<').unwrap_or(rest.len());
+        let value = &rest[..end];
+        if let Some(decoded) = decode_xml_entities(value) {
+            add_card_text(&stack, &decoded, &mut fields);
+        } else {
+            invalid = true;
+            break;
+        }
+        position += end;
+    }
+    card.app_msg_type = fields.get("type").and_then(|value| value.trim().parse().ok());
+    card.malformed = invalid || roots != 1 || !stack.is_empty() || card.app_msg_type.is_none();
+    if matches!(card.app_msg_type, Some(33 | 36)) && !card.malformed {
+        let value = |key| fields.get(key).map(|text| text.trim().to_string()).filter(|text| !text.is_empty());
+        card.mini_program = Some(MiniProgramInfo {
+            title: value("title"),
+            app_name: value("sourcedisplayname"),
+            app_id: value("appid"),
+            user_name: value("username"),
+            page_path: value("pagepath"),
+            description: value("des"),
+        });
+    }
+    card
+}
+
+fn add_card_text(stack: &[&str], value: &str, fields: &mut HashMap<&'static str, String>) {
+    let key = match stack {
+        ["msg", "appmsg", "type"] => Some("type"),
+        ["msg", "appmsg", "title"] => Some("title"),
+        ["msg", "appmsg", "sourcedisplayname"] => Some("sourcedisplayname"),
+        ["msg", "appmsg", "des"] => Some("des"),
+        ["msg", "appmsg", "weappinfo", "appid"] => Some("appid"),
+        ["msg", "appmsg", "weappinfo", "username"] => Some("username"),
+        ["msg", "appmsg", "weappinfo", "pagepath"] => Some("pagepath"),
+        _ => None,
+    };
+    if let Some(key) = key { fields.entry(key).or_default().push_str(value); }
+}
+
+fn decode_xml_entities(value: &str) -> Option<String> {
+    let mut decoded = String::with_capacity(value.len());
+    let mut remaining = value;
+    while let Some(start) = remaining.find('&') {
+        decoded.push_str(&remaining[..start]);
+        remaining = &remaining[start + 1..];
+        let end = remaining.find(';')?;
+        let entity = &remaining[..end];
+        let character = match entity {
+            "amp" => '&', "lt" => '<', "gt" => '>', "quot" => '"', "apos" => '\'',
+            _ if entity.starts_with("#x") => char::from_u32(u32::from_str_radix(&entity[2..], 16).ok()?)?,
+            _ if entity.starts_with('#') => char::from_u32(entity[1..].parse().ok()?)?,
+            _ => return None,
+        };
+        decoded.push(character);
+        remaining = &remaining[end + 1..];
+    }
+    decoded.push_str(remaining);
+    Some(decoded)
 }
 
 /// Extract the stable identifiers carried by a Finder share message.
@@ -446,6 +604,18 @@ pub fn list_messages(
             // Finder identifiers are present in the original app-message XML.
             let finder_source = extract_finder_source(&body, msg_type);
             let finder = finder_source.as_ref().map(finder_info);
+            let card = parse_app_card(&body, msg_type);
+            let app_msg_type = card.app_msg_type;
+            let mini_program = card.mini_program;
+            let card_parse_error = if card.malformed {
+                Some(if matches!(app_msg_type, Some(33 | 36)) {
+                    "MINI_PROGRAM_CARD_MALFORMED"
+                } else {
+                    "CARD_SUBTYPE_UNRECOGNIZED"
+                }.to_string())
+            } else {
+                None
+            };
 
             // Clean content for display (replace XML with summaries)
             let content = clean_content(&body, msg_type);
@@ -516,6 +686,9 @@ pub fn list_messages(
                     is_self,
                     reply,
                     finder,
+                    app_msg_type,
+                    mini_program,
+                    card_parse_error,
                 },
                 finder_source,
             })
@@ -526,6 +699,36 @@ pub fn list_messages(
 #[cfg(test)]
 mod tests {
     use super::{clean_content, extract_finder_source, extract_group_sender, finder_info, finder_media_url};
+
+    #[test]
+    fn mini_program_card_keeps_source_identity_and_display_fields() {
+        let xml = r#"<msg><appmsg appid="" sdkver="0"><title><![CDATA[福州地铁生活圈life]]></title><type>33</type><sourcedisplayname><![CDATA[福州地铁生活圈 Life]]></sourcedisplayname><weappinfo><appid>wx123</appid><username>gh_test@app</username><pagepath>pages/home</pagepath></weappinfo></appmsg></msg>"#;
+        let card = super::parse_app_card(xml, 49).mini_program.expect("mini program card");
+        assert_eq!(card.title.as_deref(), Some("福州地铁生活圈life"));
+        assert_eq!(card.app_name.as_deref(), Some("福州地铁生活圈 Life"));
+        assert_eq!(card.app_id.as_deref(), Some("wx123"));
+        assert_eq!(card.page_path.as_deref(), Some("pages/home"));
+        assert!(super::parse_app_card(&xml.replace("<type>33</type>", "<type>36</type>"), 49).mini_program.is_some());
+        assert!(super::parse_app_card(&xml.replace("<type>33</type>", "<type>5</type>"), 49).mini_program.is_none());
+    }
+
+    #[test]
+    fn card_type_must_be_direct_child_and_xml_must_be_well_formed() {
+        let web = "<msg><appmsg><extra><type>33</type></extra><type>5</type><title>Web</title></appmsg></msg>";
+        let parsed = super::parse_app_card(web, 49);
+        assert_eq!(parsed.app_msg_type, Some(5));
+        assert!(parsed.mini_program.is_none());
+        assert!(!parsed.malformed);
+
+        let damaged = "<msg><appmsg><type>33</type><title>Mini</appmsg></msg>";
+        let parsed = super::parse_app_card(damaged, 49);
+        assert_eq!(parsed.app_msg_type, Some(33));
+        assert!(parsed.mini_program.is_none());
+        assert!(parsed.malformed);
+        assert!(super::parse_app_card("<!DOCTYPE msg><msg><appmsg><type>33</type></appmsg></msg>", 49).malformed);
+        let numeric = "<msg><appmsg><type>33</type><title>&#x798F;&#24030;</title></appmsg></msg>";
+        assert_eq!(super::parse_app_card(numeric, 49).mini_program.unwrap().title.as_deref(), Some("福州"));
+    }
 
     #[test]
     fn extracts_finder_identifiers_without_changing_legacy_content() {

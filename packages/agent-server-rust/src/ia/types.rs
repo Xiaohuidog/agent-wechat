@@ -422,6 +422,18 @@ pub struct FinderInfo {
     pub duration_seconds: Option<u32>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct MiniProgramInfo {
+    pub title: Option<String>,
+    pub app_name: Option<String>,
+    pub app_id: Option<String>,
+    pub user_name: Option<String>,
+    pub page_path: Option<String>,
+    pub description: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
@@ -454,6 +466,15 @@ pub struct Message {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub finder: Option<FinderInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub app_msg_type: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub mini_program: Option<MiniProgramInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub card_parse_error: Option<String>,
 }
 
 // ============================================

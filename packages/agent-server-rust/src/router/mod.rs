@@ -8,6 +8,7 @@ mod file_downloads;
 mod image_downloads;
 mod video_downloads;
 mod messages;
+mod replies;
 mod sessions;
 mod status;
 mod vnc;
@@ -55,6 +56,8 @@ pub fn build_router() -> Router {
             get(messages::get_media),
         )
         .route("/api/messages/send", post(messages::send_message))
+        .route("/api/messages/reply/capabilities", get(replies::capabilities))
+        .route("/api/messages/reply", post(replies::send))
         .route("/api/finder/short-link", post(finder::short_link))
         .route("/api/finder/media-source/{chat_id}/{local_id}/{kind}", get(finder::media_source))
         .route("/api/finder/session", get(finder::session_status))

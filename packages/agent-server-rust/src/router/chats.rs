@@ -160,6 +160,7 @@ pub async fn open_chat(
     Path(chat_id): Path<String>,
     Query(params): Query<OpenChatParams>,
 ) -> Json<serde_json::Value> {
+    let _guard = super::ui_lock::UI_OPERATION_LOCK.lock().await;
     let clear_unreads = params.clear_unreads;
     let session = match get_session("default") {
         Some(s) => s,

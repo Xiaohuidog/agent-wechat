@@ -285,6 +285,7 @@ pub struct FileInput {
 }
 
 pub async fn send_message(Json(input): Json<SendParams>) -> Json<SendResult> {
+    let _guard = super::ui_lock::UI_OPERATION_LOCK.lock().await;
     if input.text.is_none() && input.image.is_none() && input.file.is_none() {
         return Json(SendResult {
             success: false,

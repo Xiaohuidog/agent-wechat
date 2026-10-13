@@ -161,9 +161,9 @@ def get_text(chat_name):
 
 
 def main(params):
-    token = Path('/data/auth-token').read_text().strip()
+    token = os.environ.get('AGENT_WECHAT_TOKEN') or Path('/data/auth-token').read_text().strip()
     def api(path):
-        req = urllib.request.Request('http://127.0.0.1:6174' + path,
+        req = urllib.request.Request('http://127.0.0.1:' + os.environ.get('AGENT_PORT', '6174') + path,
                                      headers={'Authorization': 'Bearer ' + token})
         with urllib.request.urlopen(req, timeout=20) as result:
             return json.load(result)
@@ -292,6 +292,15 @@ def main(params):
         one(nodes, lambda n: n.get('role') == 'push-button' and n.get('name') in ['Send', 'Send(S)']
             and 'DISABLED' not in n.get('states', []), 'REPLY_SEND_UNAVAILABLE')
         before = max(r['local_id'] for r in rows)
+        path, pragmas = db_info
+        arrived = query('file:' + str(path) + '?immutable=1', pragmas,
+                        'SELECT (local_type & 2147483647) AS type,hex(message_content) AS body '
+                        'FROM "' + table + '" WHERE local_id>' + str(before) + ';')
+        repeated = sum(r['type'] == 1 and r['body'] == source['body'] for r in rows) > 1
+        if (arrived and repeated) or any(r['type'] == 1 and decode_body(r['body']) == source['body'] for r in arrived):
+            raise ReplyError('REPLY_CHAT_CHANGED')
+        if api('/api/status/auth').get('loggedInUser') != params['accountId']:
+            raise ReplyError('REPLY_ACCOUNT_CHANGED')
         # Record intent before Return. Any exception afterwards has an unknown outcome.
         dispatched = True
         subprocess.run(['/opt/tools/key', 'Return'], capture_output=True, timeout=5, check=True)

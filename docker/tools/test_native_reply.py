@@ -27,4 +27,8 @@ class NativeReplyTests(unittest.TestCase):
   r=row(1,'<msg><appmsg><title>reply</title><refermsg><content>source</content></refermsg></appmsg></msg>',49)
   self.assertTrue(reply.row_matches(r,"reply\nQuote Someone's message: source"))
   self.assertFalse(reply.row_matches(r,"reply\nQuote Someone's message: different"))
+ def test_native_quote_can_itself_be_selected_for_reply(self):
+  body='<msg><appmsg><title>reply</title><refermsg><svrid>123</svrid><content>source</content></refermsg></appmsg></msg>'
+  nodes=[node("reply\nQuote Someone's message: source")]
+  self.assertIs(reply.source_node([row(7,body,49)],nodes,7),nodes[0])
 if __name__=='__main__':unittest.main()

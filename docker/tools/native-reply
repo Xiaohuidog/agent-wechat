@@ -93,11 +93,12 @@ def row_matches(row, name):
 def source_node(rows, visible, local_id):
     """Accept only a unique mapping of the visible ordered rows to database IDs."""
     source = next(r for r in rows if r['local_id'] == local_id)
-    candidates = [i for i, n in enumerate(visible) if n['name'] == source['body']]
+    caption = display_body(source)
+    candidates = [i for i, n in enumerate(visible) if row_matches(source, n['name'])]
     if not candidates:
         return None
     # Unique body in the complete chat is unambiguous, including older history.
-    if sum(r['type'] == 1 and r['body'] == source['body'] for r in rows) == 1:
+    if sum(display_body(r) == caption for r in rows) == 1:
         return visible[candidates[0]] if len(candidates) == 1 else None
     placements = []
     for start in range(len(rows) - len(visible) + 1):
@@ -210,7 +211,11 @@ def main(params):
     matches = [r for r in rows if str(r['server_id']) == params['sourceMessageId'] and r['server_id'] > 0]
     if not matches:
         matches = [r for r in rows if str(r['local_id']) == params['sourceMessageId'] and r['server_id'] == 0]
-    if len(matches) != 1 or matches[0]['type'] != 1 or matches[0]['body'] != params['sourceText']:
+    if len(matches) != 1:
+        raise ReplyError('REPLY_SOURCE_UNAVAILABLE')
+    source = matches[0]
+    supported = source['type'] == 1 or (source['type'] == 49 and reference(source['body']) is not None)
+    if not supported or display_body(source) != params['sourceText']:
         raise ReplyError('REPLY_SOURCE_UNAVAILABLE')
     source = matches[0]
     if source['server_id'] <= 0:
@@ -271,7 +276,7 @@ def main(params):
     nodes = list(flatten(tree()))
     quote = one(nodes, lambda n: n.get('role') == 'menu-item' and n.get('name') == 'Quote',
                 'REPLY_QUOTE_MENU_UNAVAILABLE')
-    expected = "Quote " + sender_name + "'s message: " + source['body']
+    expected = "Quote " + sender_name + "'s message: " + display_body(source)
     generated = False
     dispatched = False
     preview = None
@@ -296,8 +301,8 @@ def main(params):
         arrived = query('file:' + str(path) + '?immutable=1', pragmas,
                         'SELECT (local_type & 2147483647) AS type,hex(message_content) AS body '
                         'FROM "' + table + '" WHERE local_id>' + str(before) + ';')
-        repeated = sum(r['type'] == 1 and r['body'] == source['body'] for r in rows) > 1
-        if (arrived and repeated) or any(r['type'] == 1 and decode_body(r['body']) == source['body'] for r in arrived):
+        repeated = sum(display_body(r) == display_body(source) for r in rows) > 1
+        if (arrived and repeated) or any(display_body({**r, 'body': decode_body(r['body'])}) == display_body(source) for r in arrived):
             raise ReplyError('REPLY_CHAT_CHANGED')
         if api('/api/status/auth').get('loggedInUser') != params['accountId']:
             raise ReplyError('REPLY_ACCOUNT_CHANGED')

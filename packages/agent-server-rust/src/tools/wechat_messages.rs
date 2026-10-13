@@ -1,5 +1,5 @@
 use super::wechat_db::{get_db_path, query_wechat_db};
-use crate::ia::types::{FinderInfo, Message, ReplyInfo};
+use crate::ia::types::{FinderInfo, Message, MiniProgramInfo, ReplyInfo};
 use md5::{Digest, Md5};
 use std::collections::HashMap;
 
@@ -119,6 +119,30 @@ fn clean_content(content: &str, msg_type: i32) -> String {
     }
 }
 
+fn extract_appmsg_type(content: &str, msg_type: i32) -> Option<i32> {
+    if (msg_type & 0x7FFFFFFF) != 49 || content.len() > 1024 * 1024 {
+        return None;
+    }
+    let appmsg = extract_xml_element_body(content, "appmsg")?;
+    extract_xml_tag(&appmsg, "type")?.parse().ok()
+}
+
+fn extract_mini_program(content: &str, msg_type: i32) -> Option<MiniProgramInfo> {
+    if !matches!(extract_appmsg_type(content, msg_type), Some(33 | 36)) {
+        return None;
+    }
+    let appmsg = extract_xml_element_body(content, "appmsg")?;
+    let weappinfo = extract_xml_element_body(appmsg, "weappinfo").unwrap_or_default();
+    Some(MiniProgramInfo {
+        title: extract_xml_tag(appmsg, "title"),
+        app_name: extract_xml_tag(appmsg, "sourcedisplayname"),
+        app_id: extract_xml_tag(weappinfo, "appid"),
+        user_name: extract_xml_tag(weappinfo, "username"),
+        page_path: extract_xml_tag(weappinfo, "pagepath"),
+        description: extract_xml_tag(appmsg, "des"),
+    })
+}
+
 /// Extract the stable identifiers carried by a Finder share message.
 ///
 /// Keep the existing display-oriented `content` unchanged and expose only the
@@ -234,6 +258,17 @@ fn extract_xml_attr(xml: &str, attr: &str) -> Option<String> {
     let end = xml[start..].find('"')? + start;
     let val = xml[start..end].trim().to_string();
     if val.is_empty() { None } else { Some(val) }
+}
+
+fn extract_xml_element_body<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
+    let start = xml.find(&format!("<{tag}"))?;
+    let boundary = xml.as_bytes().get(start + tag.len() + 1)?;
+    if !matches!(*boundary, b'>' | b' ' | b'\t' | b'\n') {
+        return None;
+    }
+    let open_end = xml[start..].find('>')? + start + 1;
+    let close = xml[open_end..].find(&format!("</{tag}>"))? + open_end;
+    Some(&xml[open_end..close])
 }
 
 /// Extract text between XML tags: <tag>text</tag>
@@ -446,6 +481,8 @@ pub fn list_messages(
             // Finder identifiers are present in the original app-message XML.
             let finder_source = extract_finder_source(&body, msg_type);
             let finder = finder_source.as_ref().map(finder_info);
+            let app_msg_type = extract_appmsg_type(&body, msg_type);
+            let mini_program = extract_mini_program(&body, msg_type);
 
             // Clean content for display (replace XML with summaries)
             let content = clean_content(&body, msg_type);
@@ -516,6 +553,8 @@ pub fn list_messages(
                     is_self,
                     reply,
                     finder,
+                    app_msg_type,
+                    mini_program,
                 },
                 finder_source,
             })
@@ -526,6 +565,17 @@ pub fn list_messages(
 #[cfg(test)]
 mod tests {
     use super::{clean_content, extract_finder_source, extract_group_sender, finder_info, finder_media_url};
+
+    #[test]
+    fn mini_program_card_keeps_source_identity_and_display_fields() {
+        let xml = r#"<msg><appmsg appid="" sdkver="0"><title><![CDATA[福州地铁生活圈life]]></title><type>33</type><sourcedisplayname><![CDATA[福州地铁生活圈 Life]]></sourcedisplayname><weappinfo><appid>wx123</appid><username>gh_test@app</username><pagepath>pages/home</pagepath></weappinfo></appmsg></msg>"#;
+        let card = super::extract_mini_program(xml, 49).expect("mini program card");
+        assert_eq!(card.title.as_deref(), Some("福州地铁生活圈life"));
+        assert_eq!(card.app_name.as_deref(), Some("福州地铁生活圈 Life"));
+        assert_eq!(card.app_id.as_deref(), Some("wx123"));
+        assert_eq!(card.page_path.as_deref(), Some("pages/home"));
+        assert!(super::extract_mini_program(&xml.replace("<type>33</type>", "<type>5</type>"), 49).is_none());
+    }
 
     #[test]
     fn extracts_finder_identifiers_without_changing_legacy_content() {

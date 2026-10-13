@@ -472,6 +472,9 @@ pub struct Message {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub mini_program: Option<MiniProgramInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub card_parse_error: Option<String>,
 }
 
 // ============================================

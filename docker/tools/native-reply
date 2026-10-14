@@ -121,7 +121,7 @@ def row_matches(row, name):
         return bool(expected and expected in name)
     names = {3: ('image', '图片'), 34: ('voice', '语音'), 43: ('video', '视频'),
              62: ('video', '视频'), 47: ('sticker', 'emoji', '表情')}
-    return any(label in name.casefold() for label in names.get(row['type'], ()))
+    return '\nQuote ' not in name and any(label in name.casefold() for label in names.get(row['type'], ()))
 
 
 def message_nodes(messages):
@@ -159,6 +159,18 @@ def flatten(node):
     yield node
     for child in node.get('children', []):
         yield from flatten(child)
+
+
+def chat_ready(nodes, name):
+    # Reuse only a uniquely verified chat with its own editable input and message list.
+    required = [('label', name), ('list', 'Messages')]
+    if any(sum(n.get('role') == role and n.get('name') == value for n in nodes) != 1
+           for role, value in required):
+        return False
+    editors = [n for n in nodes if n.get('role') == 'text' and n.get('name') == name
+               and 'EDITABLE' in (n.get('states') or [])]
+    frames = [n for n in nodes if n.get('role') == 'frame' and n.get('name') in ['Weixin', 'WeChat']]
+    return len(editors) == 1 and len(frames) == 1
 
 
 def quote_cancel_button(root, expected):
@@ -295,11 +307,13 @@ def main(params):
     sender_name = source_wire[0].get('senderName')
     if not sender_name:
         raise ReplyError('REPLY_SOURCE_SENDER_UNAVAILABLE')
-    opened = subprocess.run(['/opt/tools/chat-select', '--chat-name', chat['name'], params['chatId']],
-                            capture_output=True, text=True, timeout=45)
-    if opened.returncode or not json.loads(opened.stdout).get('ok'):
-        raise ReplyError('REPLY_TARGET_UNAVAILABLE')
     nodes = list(flatten(tree()))
+    if not chat_ready(nodes, chat['name']):
+        opened = subprocess.run(['/opt/tools/chat-select', '--chat-name', chat['name'], params['chatId']],
+                                capture_output=True, text=True, timeout=45)
+        if opened.returncode or not json.loads(opened.stdout).get('ok'):
+            raise ReplyError('REPLY_TARGET_UNAVAILABLE')
+        nodes = list(flatten(tree()))
     frame = one(nodes, lambda n: n.get('role') == 'frame' and n.get('name') in ['Weixin', 'WeChat'],
                 'REPLY_WINDOW_UNAVAILABLE')
     b = frame['bounds']

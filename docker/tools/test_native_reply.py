@@ -56,4 +56,14 @@ class NativeReplyTests(unittest.TestCase):
   self.assertIsNone(reply.quote_cancel_button({'children':[preview]},'Quote source'))
  def test_quote_cleanup_never_selects_unowned_preview(self):
   self.assertIsNone(reply.quote_cancel_button({'children':[{'role':'invalid','name':'user draft'}]},'Quote source'))
+ def test_ready_chat_requires_unique_header_editor_messages_and_window(self):
+  nodes=[{'role':'label','name':'target'},{'role':'list','name':'Messages'}, {'role':'text','name':'target','states':['EDITABLE']},{'role':'frame','name':'Weixin'}]
+  self.assertTrue(reply.chat_ready(nodes,'target'))
+  self.assertFalse(reply.chat_ready(nodes,'other'))
+  for i in range(len(nodes)):
+   self.assertFalse(reply.chat_ready(nodes[:i]+nodes[i+1:],'target'))
+  self.assertFalse(reply.chat_ready(nodes+[nodes[0]],'target'))
+ def test_quoted_media_caption_is_not_another_media_message(self):
+  self.assertFalse(reply.row_matches(row(1,'',3),"reply\nQuote Sender's message: Image"))
+  self.assertTrue(reply.row_matches(row(1,'',3),'Image'))
 if __name__=='__main__':unittest.main()

@@ -47,4 +47,13 @@ class NativeReplyTests(unittest.TestCase):
   nodes=[{**node('08:43'),'role':'list-item','bounds':{'y':0,'height':41}}, {**node('08:43'),'role':'list-item','bounds':{'y':41,'height':72}}]
   messages={'bounds':{'y':0,'height':200},'children':nodes}
   self.assertEqual(reply.message_nodes(messages),nodes[1:])
+ def test_media_quote_cleanup_selects_sibling_cancel_not_thumbnail(self):
+  thumbnail={'role':'push-button','bounds':{'x':80,'y':10,'width':40,'height':40}}
+  preview={'role':'invalid','name':'Quote source','bounds':{'x':0,'y':0,'width':130,'height':50},'children':[thumbnail]}
+  cancel={'role':'push-button','bounds':{'x':136,'y':16,'width':16,'height':16}}
+  duplicate={**cancel,'children':[cancel]}
+  self.assertIs(reply.quote_cancel_button({'children':[preview,duplicate]},'Quote source'),cancel)
+  self.assertIsNone(reply.quote_cancel_button({'children':[preview]},'Quote source'))
+ def test_quote_cleanup_never_selects_unowned_preview(self):
+  self.assertIsNone(reply.quote_cancel_button({'children':[{'role':'invalid','name':'user draft'}]},'Quote source'))
 if __name__=='__main__':unittest.main()

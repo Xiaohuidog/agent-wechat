@@ -161,6 +161,25 @@ def flatten(node):
         yield from flatten(child)
 
 
+def quote_cancel_button(root, expected):
+    # Media previews contain a clickable thumbnail. The cancel control is its sibling.
+    for parent in flatten(root):
+        previews = [n for n in parent.get('children', [])
+                    if n.get('role') == 'invalid' and n.get('name') == expected]
+        if len(previews) != 1:
+            continue
+        b = previews[0]['bounds']
+        buttons = {}
+        for n in flatten(parent):
+            nb = n.get('bounds') or {}
+            if (n.get('role') == 'push-button' and nb.get('x', -1) >= b['x'] + b['width']
+                    and b['y'] <= nb.get('y', -1) < b['y'] + b['height']):
+                buttons[tuple(nb[k] for k in ['x', 'y', 'width', 'height'])] = n
+        if len(buttons) == 1:
+            return next(iter(buttons.values()))
+    return None
+
+
 def tree():
     result = subprocess.run(['/opt/tools/a11y-dump'], capture_output=True,
                             text=True, timeout=20, check=True)
@@ -401,11 +420,11 @@ def main(params):
     finally:
         # Remove only the quote created by this operation, never an existing user draft.
         if not dispatched and preview:
-            current = [n for n in flatten(tree()) if n.get("role") == "invalid" and n.get("name") == expected]
-            buttons = [n for n in flatten(current[0] if len(current) == 1 else {}) if n.get('role') == 'push-button']
-            if len(buttons) == 1:
-                click(buttons[0])
-            subprocess.run(['/opt/tools/key', 'Escape'], capture_output=True, timeout=5)
+            cancel = quote_cancel_button(tree(), expected)
+            if cancel:
+                click(cancel)
+            if any(n.get('role') == 'invalid' and n.get('name') == expected for n in flatten(tree())):
+                raise ReplyError('REPLY_QUOTE_CLEANUP_FAILED')
 
 
 if __name__ == '__main__':

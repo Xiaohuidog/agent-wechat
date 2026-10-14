@@ -77,33 +77,76 @@ def display_body(row):
     return None
 
 
+def source_kind_supported(row, kind):
+    allowed = {'text': {1, 49}, 'baidu_link': {1, 49}, 'image': {3},
+               'voice': {34}, 'video': {43, 62}, 'sticker': {47},
+               'file': {49}, 'mini_program': {49}, 'video_channel': {49}}
+    if row['type'] not in allowed.get(kind, set()):
+        return False
+    if row['type'] != 49:
+        return True
+    try:
+        root = ET.fromstring(row['body'][row['body'].index('<'):])
+        subtype = root.findtext('.//appmsg/type')
+    except (ValueError, ET.ParseError):
+        return False
+    subtype_sets = {'text': {'3', '4', '5', '57'}, 'baidu_link': {'3', '4', '5', '57'},
+                    'file': {'6'}, 'mini_program': {'33', '36'}, 'video_channel': {'51'}}
+    return subtype in subtype_sets.get(kind, set())
+
+
+def reference_caption(ref):
+    labels = {'3': 'Image', '34': 'Voice message', '43': 'Video', '62': 'Video', '47': 'Sticker'}
+    if ref.get('type') in labels:
+        return labels[ref['type']]
+    content = ref.get('content') or ''
+    if ref.get('type') == '49' and '<appmsg' in content:
+        try:
+            return ET.fromstring(content[content.index('<'):]).findtext('.//appmsg/title') or content
+        except (ValueError, ET.ParseError):
+            pass
+    return content
+
+
 def row_matches(row, name):
     expected = display_body(row)
-    if expected is None:
-        return True  # Media rows are never used as identity anchors.
     if row['type'] == 1:
         return name == expected
-    ref = reference(row['body'])
-    if ref:
-        return name.startswith(expected + '\nQuote ') and name.endswith(
-            "'s message: " + (ref['content'] or ''))
-    return name == expected
+    if row['type'] == 49:
+        ref = reference(row['body'])
+        if ref:
+            caption = reference_caption(ref)
+            return name.startswith((expected or '') + '\nQuote ') and name.casefold().endswith(
+                "'s message: " + caption.casefold())
+        return bool(expected and expected in name)
+    names = {3: ('image', '图片'), 34: ('voice', '语音'), 43: ('video', '视频'),
+             62: ('video', '视频'), 47: ('sticker', 'emoji', '表情')}
+    return any(label in name.casefold() for label in names.get(row['type'], ()))
+
+
+def message_nodes(messages):
+    # Qt exposes time separators as list-items too; they are not database message rows.
+    bounds = messages['bounds']
+    time_label = re.compile(r'^(?:\d{1,2}:\d{2}|(?:Today|Yesterday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\b.*|\d{4}[-/]\d{1,2}[-/]\d{1,2}.*)$')
+    return [n for n in messages.get('children', []) if n.get('role') == 'list-item'
+            and n.get('bounds', {}).get('height', 0) > 0
+            and n['bounds']['y'] >= bounds['y']
+            and n['bounds']['y'] + n['bounds']['height'] <= bounds['y'] + bounds['height']
+            and not (n['bounds']['height'] <= 45 and time_label.fullmatch(n.get('name', '')))]
 
 
 def source_node(rows, visible, local_id):
-    """Accept only a unique mapping of the visible ordered rows to database IDs."""
+    """Accept a unique text identity or unique ordered mapping of the visible message rows."""
     source = next(r for r in rows if r['local_id'] == local_id)
-    caption = display_body(source)
     candidates = [i for i, n in enumerate(visible) if row_matches(source, n['name'])]
     if not candidates:
         return None
-    # Unique body in the complete chat is unambiguous, including older history.
-    if sum(display_body(r) == caption for r in rows) == 1:
+    caption = display_body(source)
+    # Media labels repeat; they always require ordered context, never label-only selection.
+    if caption is not None and sum(display_body(r) == caption for r in rows) == 1:
         return visible[candidates[0]] if len(candidates) == 1 else None
-    placements = []
-    for start in range(len(rows) - len(visible) + 1):
-        if all(row_matches(rows[start + i], n['name']) for i, n in enumerate(visible)):
-            placements.append(start)
+    placements = [start for start in range(len(rows) - len(visible) + 1)
+                  if all(row_matches(rows[start + i], n['name']) for i, n in enumerate(visible))]
     if len(placements) != 1:
         raise ReplyError('REPLY_SOURCE_AMBIGUOUS')
     offset = next(i for i, r in enumerate(rows) if r['local_id'] == local_id) - placements[0]
@@ -214,8 +257,8 @@ def main(params):
     if len(matches) != 1:
         raise ReplyError('REPLY_SOURCE_UNAVAILABLE')
     source = matches[0]
-    supported = source['type'] == 1 or (source['type'] == 49 and reference(source['body']) is not None)
-    if not supported or display_body(source) != params['sourceText']:
+    kind = params.get('sourceKind', 'text')
+    if not source_kind_supported(source, kind) or (source['type'] == 1 and kind == 'text' and source['body'] != params['sourceText']):
         raise ReplyError('REPLY_SOURCE_UNAVAILABLE')
     source = matches[0]
     if source['server_id'] <= 0:
@@ -248,6 +291,15 @@ def main(params):
         raise ReplyError('REPLY_EXISTING_DRAFT')
     if get_text(chat['name']).strip():
         raise ReplyError('REPLY_EXISTING_DRAFT')
+    # Each operation starts from latest messages; an earlier history reply must not hide newer sources.
+    nodes = list(flatten(tree()))
+    messages = one(nodes, lambda n: n.get('role') == 'list' and n.get('name') == 'Messages',
+                   'REPLY_MESSAGES_UNAVAILABLE')
+    mb = messages['bounds']
+    subprocess.run(['xdotool', 'mousemove', str(round(mb['x'] + mb['width']/2)),
+                    str(round(mb['y'] + mb['height']/2)), 'click', '--repeat', '200', '--delay', '5', '5'],
+                   capture_output=True, timeout=8, check=True)
+    time.sleep(0.2)
     target = None
     for attempt in range(32):
         nodes = list(flatten(tree()))
@@ -256,10 +308,7 @@ def main(params):
         messages = one(nodes, lambda n: n.get('role') == 'list' and n.get('name') == 'Messages',
                        'REPLY_MESSAGES_UNAVAILABLE')
         vb = messages['bounds']
-        visible = [n for n in messages.get('children', []) if n.get('role') == 'list-item'
-                   and n.get('bounds', {}).get('height', 0) > 0
-                   and n['bounds']['y'] >= vb['y']
-                   and n['bounds']['y'] + n['bounds']['height'] <= vb['y'] + vb['height']]
+        visible = message_nodes(messages)
         target = source_node(rows, visible, source['local_id'])
         if target:
             break
@@ -274,17 +323,30 @@ def main(params):
     offset = b['width'] - 74 if source_wire[0].get('isSelf') else 74
     click(target, button=3, x_offset=offset)
     nodes = list(flatten(tree()))
-    quote = one(nodes, lambda n: n.get('role') == 'menu-item' and n.get('name') == 'Quote',
-                'REPLY_QUOTE_MENU_UNAVAILABLE')
-    expected = "Quote " + sender_name + "'s message: " + display_body(source)
+    try:
+        quote = one(nodes, lambda n: n.get('role') == 'menu-item' and n.get('name') == 'Quote',
+                    'REPLY_QUOTE_MENU_UNAVAILABLE')
+    except ReplyError:
+        subprocess.run(['/opt/tools/key', 'Escape'], capture_output=True, timeout=5)
+        raise
+    prefix = "Quote " + sender_name + "'s message: "
+    expected = None
+    caption = display_body(source)
+    if source['type'] == 1 or (source['type'] == 49 and reference(source['body'])):
+        expected = prefix + (caption or '')
     generated = False
     dispatched = False
     preview = None
     try:
         click(quote)
         nodes = list(flatten(tree()))
-        preview = one(nodes, lambda n: n.get('role') == 'invalid' and n.get('name') == expected,
+        preview = one(nodes, lambda n: n.get('role') == 'invalid'
+                      and (n.get('name') == expected if expected is not None else n.get('name', '').startswith(prefix)),
                       'REPLY_QUOTE_PREVIEW_MISMATCH')
+        expected = preview['name']
+        if params.get('previewOnly') is True:
+            return {'success': True, 'status': 'validated', 'sourceKind': kind,
+                    'sourceServerId': str(source['server_id'])}
         subprocess.run(['/opt/tools/input', params['text']], capture_output=True, timeout=10, check=True)
         generated = True
         if get_text(chat['name']) != params['text']:
@@ -301,7 +363,7 @@ def main(params):
         arrived = query('file:' + str(path) + '?immutable=1', pragmas,
                         'SELECT (local_type & 2147483647) AS type,hex(message_content) AS body '
                         'FROM "' + table + '" WHERE local_id>' + str(before) + ';')
-        repeated = sum(display_body(r) == display_body(source) for r in rows) > 1
+        repeated = caption is None or sum(display_body(r) == caption for r in rows) > 1
         if (arrived and repeated) or any(display_body({**r, 'body': decode_body(r['body'])}) == display_body(source) for r in arrived):
             raise ReplyError('REPLY_CHAT_CHANGED')
         if api('/api/status/auth').get('loggedInUser') != params['accountId']:
@@ -322,7 +384,7 @@ def main(params):
                 if display_body(row) == params['text'] and ref and ref['svrid'] == str(source['server_id']):
                     valid.append(row)
             if len(valid) == 1 and valid[0]['server_id'] > 0:
-                return {'success': True, 'status': 'succeeded',
+                return {'success': True, 'status': 'succeeded', 'sourceKind': kind,
                         'sourceServerId': str(source['server_id']),
                         'sentServerId': str(valid[0]['server_id']), 'sentLocalId': valid[0]['local_id']}
             if len(valid) > 1:

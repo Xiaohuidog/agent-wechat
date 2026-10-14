@@ -374,10 +374,15 @@ fn extract_reply_info(content: &str, msg_type: i32) -> Option<ReplyInfo> {
         .replace("&quot;", "\"");
 
     // The referred content may itself be XML — clean it to a short text
-    let clean = if unescaped.contains("<msg>") {
-        extract_xml_tag(&unescaped, "title").unwrap_or(unescaped)
-    } else {
-        unescaped
+    let ref_type = extract_xml_tag(refermsg, "type");
+    let clean = match ref_type.as_deref() {
+        Some("3") => "[图片]".to_string(),
+        Some("34") => "[语音]".to_string(),
+        Some("43") | Some("62") => "[视频]".to_string(),
+        Some("47") => "[表情]".to_string(),
+        _ if unescaped.contains("<msg>") => extract_xml_tag(&unescaped, "title")
+            .unwrap_or_else(|| "[引用消息]".to_string()),
+        _ => unescaped,
     };
     Some(ReplyInfo {
         sender,
@@ -698,6 +703,12 @@ pub fn list_messages(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn media_references_use_labels_instead_of_source_xml() {
+        let content = r#"<msg><appmsg><refermsg><type>3</type><content>&lt;msg&gt;&lt;img aeskey="test-value"/&gt;&lt;/msg&gt;</content></refermsg></appmsg></msg>"#;
+        assert_eq!(super::extract_reply_info(content, 49).unwrap().content, "[图片]");
+    }
+
     use super::{clean_content, extract_finder_source, extract_group_sender, finder_info, finder_media_url};
 
     #[test]

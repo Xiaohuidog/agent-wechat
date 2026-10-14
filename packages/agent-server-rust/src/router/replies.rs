@@ -16,11 +16,20 @@ pub struct ReplyRequest {
     account_id: String,
     source_message_id: String,
     source_text: String,
+    #[serde(default = "default_source_kind", skip_serializing_if = "is_text_kind")]
+    source_kind: String,
     text: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    preview_only: bool,
 }
 
+fn is_text_kind(value: &String) -> bool { value == "text" }
+fn is_false(value: &bool) -> bool { !value }
+fn default_source_kind() -> String { "text".into() }
+const SOURCE_KINDS: &[&str] = &["text", "image", "file", "baidu_link", "sticker", "voice", "video", "video_channel", "mini_program"];
+
 pub async fn capabilities() -> Json<Value> {
-    Json(json!({"nativeTextReply": std::path::Path::new("/opt/tools/native-reply").is_file()}))
+    Json(json!({"nativeTextReply": std::path::Path::new("/opt/tools/native-reply").is_file(), "nativeReplySourceTypes": SOURCE_KINDS}))
 }
 
 fn failure(code: &str) -> Value {
@@ -35,7 +44,8 @@ fn validate(input: &ReplyRequest) -> Result<(), &'static str> {
         || input.account_id.is_empty() || input.account_id.len() > 200
         || input.source_message_id.is_empty() || input.source_message_id.len() > 30
         || !input.source_message_id.chars().all(|c| c.is_ascii_digit())
-        || input.source_text.trim().is_empty()
+        || !SOURCE_KINDS.contains(&input.source_kind.as_str())
+        || (input.source_kind == "text" && input.source_text.trim().is_empty())
     {
         return Err("REPLY_SOURCE_INVALID");
     }
@@ -108,7 +118,16 @@ mod tests {
     fn request() -> ReplyRequest {
         ReplyRequest { request_key: "once".into(), chat_id:"group@chatroom".into(),
             account_id:"account".into(), source_message_id:"6088777209553577378".into(),
-            source_text:"source".into(), text:"reply".into() }
+            source_text:"source".into(), source_kind:"text".into(), text:"reply".into(), preview_only:false }
+    }
+    #[test] fn legacy_text_request_digest_shape_is_preserved() {
+        let value=serde_json::to_value(request()).unwrap();
+        assert!(value.get("sourceKind").is_none());
+        assert!(value.get("previewOnly").is_none());
+    }
+    #[test] fn media_source_does_not_require_a_text_body() {
+        let mut r=request();r.source_kind="image".into();r.source_text.clear();assert!(validate(&r).is_ok());
+        r.source_kind="system".into();assert!(validate(&r).is_err());
     }
     #[test] fn ids_are_strings_and_text_is_bounded() {
         let mut r=request(); assert!(validate(&r).is_ok());

@@ -31,4 +31,20 @@ class NativeReplyTests(unittest.TestCase):
   body='<msg><appmsg><title>reply</title><refermsg><svrid>123</svrid><content>source</content></refermsg></appmsg></msg>'
   nodes=[node("reply\nQuote Someone's message: source")]
   self.assertIs(reply.source_node([row(7,body,49)],nodes,7),nodes[0])
+ def test_adjacent_identical_images_are_bound_by_ordered_context(self):
+  rows=[row(1,'anchor'),row(2,'',3),row(3,'',3),row(4,'after')]
+  nodes=[node('anchor'),node('Image'),node('Image'),node('after')]
+  self.assertIs(reply.source_node(rows,nodes,3),nodes[2])
+ def test_ambiguous_images_are_not_selected_by_label(self):
+  with self.assertRaisesRegex(reply.ReplyError,'REPLY_SOURCE_AMBIGUOUS'):
+   reply.source_node([row(1,'',3),row(2,'',3)],[node('Image')],2)
+ def test_nontext_source_kind_matches_native_type(self):
+  for kind,number in [('image',3),('voice',34),('video',43),('sticker',47)]:
+   self.assertTrue(reply.source_kind_supported(row(1,'',number),kind))
+  self.assertFalse(reply.source_kind_supported(row(1,'',3),'file'))
+  self.assertFalse(reply.source_kind_supported(row(1,'',10000),'system'))
+ def test_time_separators_are_removed_but_clock_text_is_kept(self):
+  nodes=[{**node('08:43'),'role':'list-item','bounds':{'y':0,'height':41}}, {**node('08:43'),'role':'list-item','bounds':{'y':41,'height':72}}]
+  messages={'bounds':{'y':0,'height':200},'children':nodes}
+  self.assertEqual(reply.message_nodes(messages),nodes[1:])
 if __name__=='__main__':unittest.main()

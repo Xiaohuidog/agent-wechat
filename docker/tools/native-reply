@@ -119,7 +119,7 @@ def row_matches(row, name):
             return name.startswith((expected or '') + '\nQuote ') and name.casefold().endswith(
                 "'s message: " + caption.casefold())
         return bool(expected and expected in name)
-    names = {3: ('image', '图片'), 34: ('voice', '语音'), 43: ('video', '视频'),
+    names = {3: ('image', '图片'), 34: ('voice', 'audio', '语音'), 43: ('video', '视频'),
              62: ('video', '视频'), 47: ('sticker', 'emoji', '表情')}
     return '\nQuote ' not in name and any(label in name.casefold() for label in names.get(row['type'], ()))
 
@@ -130,9 +130,20 @@ def message_nodes(messages):
     time_label = re.compile(r'^(?:\d{1,2}:\d{2}|(?:Today|Yesterday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\b.*|\d{4}[-/]\d{1,2}[-/]\d{1,2}.*)$')
     return [n for n in messages.get('children', []) if n.get('role') == 'list-item'
             and n.get('bounds', {}).get('height', 0) > 0
-            and n['bounds']['y'] >= bounds['y']
-            and n['bounds']['y'] + n['bounds']['height'] <= bounds['y'] + bounds['height']
+            # Partly visible rows are still identity anchors for adjacent media.
+            and n['bounds']['y'] < bounds['y'] + bounds['height']
+            and n['bounds']['y'] + n['bounds']['height'] > bounds['y']
             and not (n['bounds']['height'] <= 45 and time_label.fullmatch(n.get('name', '')))]
+
+
+def fully_visible_target(target, messages):
+    if target is None:
+        return None
+    box, viewport = target['bounds'], messages['bounds']
+    if (box['y'] < viewport['y']
+            or box['y'] + box['height'] > viewport['y'] + viewport['height']):
+        return None
+    return target
 
 
 def source_node(rows, visible, local_id):
@@ -342,7 +353,7 @@ def main(params):
                        'REPLY_MESSAGES_UNAVAILABLE')
         vb = messages['bounds']
         visible = message_nodes(messages)
-        target = source_node(rows, visible, source['local_id'])
+        target = fully_visible_target(source_node(rows, visible, source['local_id']), messages)
         if target:
             break
         # Bound the search; unavailable history is never substituted with another message.

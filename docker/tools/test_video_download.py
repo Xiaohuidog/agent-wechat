@@ -34,6 +34,20 @@ class VideoMatchTests(unittest.TestCase):
         self.assertLess(abs(match["x"] - 189), 8)
         self.assertLess(abs(match["y"] - 156), 8)
 
+    def test_self_video_thumbnail_on_right_is_found(self):
+        self.screen = Image.new("RGB", (800, 600), "#eeeeee")
+        self.screen.paste(self.target, (610, 120))
+        match = video_download.find_unique_video_match(self.screen, self.target, [self.row], side="right")
+        self.assertLess(abs(match["x"] - 631), 8)
+
+    def test_self_video_accessibility_fallback_clicks_right(self):
+        match = video_download.unique_accessibility_video_match([self.row], "a" * 32, side="right")
+        self.assertGreater(match["x"], 550)
+
+    def test_unknown_sender_side_fails_closed(self):
+        with self.assertRaisesRegex(video_download.DownloadError, "VIDEO_SENDER_UNAVAILABLE"):
+            video_download.unique_accessibility_video_match([self.row], "a" * 32, side="unknown")
+
     def test_duplicate_visual_matches_fail_closed(self):
         other = {"role": "list-item", "name": "Video0:04\n", "bounds": {"x": 100, "y": 300, "width": 600, "height": 110}}
         self.screen.paste(self.target, (168, 320))
@@ -69,6 +83,7 @@ class VideoMatchTests(unittest.TestCase):
             patch.object(video_download.image_helper, "selected_chat", side_effect=lambda *_: selected),
             patch.object(video_download.image_helper, "select_chat", side_effect=select_chat),
             patch.object(video_download.image_helper, "command", side_effect=command),
+            patch.object(video_download.image_helper, "image_message_side", return_value="right"),
             patch.object(video_download.image_helper, "capture", return_value=Image.new("RGB", (900, 700))),
             patch.object(video_download, "video_rows", return_value=[self.row]),
             patch.object(video_download, "find_unique_video_match", return_value={"x": 200, "y": 200}),

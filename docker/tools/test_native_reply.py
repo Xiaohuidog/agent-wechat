@@ -8,6 +8,10 @@ spec=importlib.util.spec_from_loader(loader.name,loader);reply=importlib.util.mo
 def row(i,body,kind=1):return {'local_id':i,'type':kind,'body':body}
 def node(name):return {'name':name}
 class NativeReplyTests(unittest.TestCase):
+ def test_native_audio_label_matches_voice_in_ordered_context(self):
+  rows=[row(211,'',3),row(212,'',43),row(213,'',34)]
+  nodes=[node('Image'),node('Video Expired0:03'),node('Audio4"secUnplayed')]
+  self.assertIs(reply.source_node(rows,nodes,213),nodes[2])
  def test_unique_original_is_located_by_id(self):
   nodes=[node('other'),node('source')]
   self.assertIs(reply.source_node([row(1,'other'),row(2,'source')],nodes,2),nodes[1])
@@ -66,4 +70,25 @@ class NativeReplyTests(unittest.TestCase):
  def test_quoted_media_caption_is_not_another_media_message(self):
   self.assertFalse(reply.row_matches(row(1,'',3),"reply\nQuote Sender's message: Image"))
   self.assertTrue(reply.row_matches(row(1,'',3),'Image'))
+
+class ViewportContextTests(unittest.TestCase):
+ def test_partial_anchor_disambiguates_adjacent_images(self):
+  rows=[row(1,'anchor'),row(2,'',3),row(3,'',3),row(4,'other'),row(5,'second anchor'),row(6,'',3),row(7,'',3)]
+  children=[dict(node('second anchor'),role='list-item',bounds={'x':0,'y':60,'width':300,'height':71}),
+            dict(node('Image'),role='list-item',bounds={'x':0,'y':131,'width':300,'height':198}),
+            dict(node('Image'),role='list-item',bounds={'x':0,'y':329,'width':300,'height':178})]
+  messages={'bounds':{'x':0,'y':100,'width':300,'height':450},'children':children}
+  self.assertIs(reply.source_node(rows,reply.message_nodes(messages),6),children[1])
+ def test_offscreen_rows_are_not_context(self):
+  children=[dict(node('old'),role='list-item',bounds={'x':0,'y':0,'width':300,'height':80}),
+            dict(node('new'),role='list-item',bounds={'x':0,'y':120,'width':300,'height':80})]
+  messages={'bounds':{'x':0,'y':100,'width':300,'height':300},'children':children}
+  self.assertEqual(reply.message_nodes(messages),children[1:])
+ def test_partial_source_cannot_be_clicked_outside_viewport(self):
+  target={'bounds':{'x':0,'y':0,'width':300,'height':150}}
+  messages={'bounds':{'x':0,'y':100,'width':300,'height':300}}
+  self.assertIsNone(reply.fully_visible_target(target,messages))
+  target['bounds']['y']=120
+  self.assertIs(reply.fully_visible_target(target,messages),target)
+
 if __name__=='__main__':unittest.main()

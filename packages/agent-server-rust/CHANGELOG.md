@@ -1,5 +1,15 @@
 # @agent-wechat/agent-server
 
+## 0.21.0
+
+### Minor Changes
+
+- [`164b042`](https://github.com/thisnick/agent-wechat/commit/164b042b2fe301f9b984acfb3a1a2b51632893bc) - Support native quoted replies to media and shared cards, with ordered source identity checks, preview validation and safe media reference labels.
+
+### Patch Changes
+
+- [`472dc06`](https://github.com/thisnick/agent-wechat/commit/472dc0632f154cd71f63105cb8005eb31c7e446e) - Reuse a uniquely verified open reply chat to avoid unnecessary chat selection and redraw delay.
+
 ## 0.20.0
 
 ### Minor Changes

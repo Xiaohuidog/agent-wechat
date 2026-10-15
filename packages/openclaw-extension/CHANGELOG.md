@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 0.13.0
+
+### Minor Changes
+
+- [`5c988ba`](https://github.com/thisnick/agent-wechat/commit/5c988ba5782b5dc03328ae60e9a3bd63f2060b00) - Add verified native quoted text replies with persistent request deduplication and explicit uncertain outcomes.
+
 ## 0.12.0
 
 ### Minor Changes

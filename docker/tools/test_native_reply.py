@@ -158,4 +158,31 @@ class ReplyViewportSafetyTests(unittest.TestCase):
    self.assertLessEqual(int(argv[argv.index('--repeat')+1]),12)
    self.assertGreaterEqual(int(argv[argv.index('--delay')+1]),80)
 
+
+class MixedMediaIdentityTests(unittest.TestCase):
+ def channels(self,i,author='Fixture Author'):
+  return row(i,'<msg><appmsg><type>51</type><title></title><finderFeed><nickname>'+author+'</nickname></finderFeed></appmsg></msg>',49)
+ def test_channels_card_matches_exact_author_label(self):
+  r=self.channels(1)
+  self.assertTrue(reply.row_matches(r,'ChannelsFixture Author'))
+  self.assertFalse(reply.row_matches(r,'ChannelsFixture Author extended'))
+  self.assertFalse(reply.row_matches(r,'ChannelsAnother Author'))
+ def test_repeated_image_is_bound_by_channels_and_text_context(self):
+  rows=[row(1,'',3),row(2,'old'),row(3,'',3),self.channels(4),row(5,'anchor')]
+  visible=[node('Image'),node('ChannelsFixture Author'),node('anchor')]
+  self.assertIs(reply.source_node(rows,visible,3),visible[0])
+ def test_repeated_channels_author_requires_unique_ordered_context(self):
+  rows=[self.channels(1),row(2,'old'),self.channels(3),row(4,'anchor')]
+  visible=[node('ChannelsFixture Author'),node('anchor')]
+  self.assertIs(reply.source_node(rows,visible,3),visible[0])
+  with self.assertRaisesRegex(reply.ReplyError,'REPLY_SOURCE_AMBIGUOUS'):
+   reply.source_node(rows,[node('ChannelsFixture Author')],3)
+ def test_system_template_can_anchor_nontext_source(self):
+  system=row(2,'<sysmsg><sysmsgtemplate><content_template><template>$member$ joined</template><link_list><link name="member"><plain>Fixture Member</plain></link></link_list></content_template></sysmsgtemplate></sysmsg>',10000)
+  rows=[row(1,'',3),system,row(3,'',3),row(4,'anchor')]
+  visible=[node('Fixture Member joined'),node('Image'),node('anchor')]
+  self.assertIs(reply.source_node(rows,visible,3),visible[1])
+ def test_unresolved_system_template_is_not_an_identity_anchor(self):
+  self.assertFalse(reply.row_matches(row(1,'<sysmsg/>',10000),'unrelated'))
+
 if __name__=='__main__':unittest.main()

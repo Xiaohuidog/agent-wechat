@@ -108,7 +108,52 @@ def reference_caption(ref):
     return content
 
 
+def system_display_text(body):
+    try:
+        root = ET.fromstring(body[body.index('<'):])
+        content = root.find('.//sysmsgtemplate/content_template')
+        if content is None:
+            return None
+        plain = content.findtext('plain')
+        if plain:
+            return plain
+        template = content.findtext('template')
+        if not template:
+            return None
+        replacements = {}
+        for link in content.findall('link_list/link'):
+            key = link.get('name')
+            if not key or key in replacements:
+                return None
+            value = link.findtext('plain')
+            if value is None:
+                members = link.findall('memberlist/member')
+                names = [member.findtext('nickname') for member in members]
+                separator = link.findtext('separator')
+                if not names or any(name is None for name in names) or (len(names) > 1 and separator is None):
+                    return None
+                value = (separator or '').join(names)
+            replacements[key] = value
+        keys = re.findall(r'\$([^$]+)\$', template)
+        if any(key not in replacements for key in keys):
+            return None
+        return re.sub(r'\$([^$]+)\$', lambda match: replacements[match[1]], template)
+    except (ValueError, ET.ParseError):
+        return None
+
+
 def row_matches(row, name):
+    if row['type'] == 10000:
+        return system_display_text(row['body']) == name
+    if row['type'] == 49 and not reference(row['body']):
+        try:
+            root = ET.fromstring(row['body'][row['body'].index('<'):])
+            app = root if root.tag == 'appmsg' else root.find('.//appmsg')
+            if app is not None and app.findtext('type') == '51':
+                author = app.findtext('finderFeed/nickname')
+                return bool(author) and name == 'Channels' + author
+        except (ValueError, ET.ParseError):
+            return False
     expected = display_body(row)
     if row['type'] == 1:
         return name == expected

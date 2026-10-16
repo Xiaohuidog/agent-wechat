@@ -2,6 +2,8 @@ import importlib.machinery
 import importlib.util
 from pathlib import Path
 import unittest
+from unittest import mock
+import subprocess
 loader=importlib.machinery.SourceFileLoader('native_reply',str(Path(__file__).with_name('native-reply')))
 spec=importlib.util.spec_from_loader(loader.name,loader);reply=importlib.util.module_from_spec(spec);loader.exec_module(reply)
 
@@ -90,5 +92,67 @@ class ViewportContextTests(unittest.TestCase):
   self.assertIsNone(reply.fully_visible_target(target,messages))
   target['bounds']['y']=120
   self.assertIs(reply.fully_visible_target(target,messages),target)
+
+
+class ReplyViewportSafetyTests(unittest.TestCase):
+ def fixture(self, message='source'):
+  item={'role':'list-item','name':message,'bounds':{'x':300,'y':180,'width':500,'height':70}}
+  return {'children':[
+   {'role':'frame','name':'Weixin','window':{'pid':100},'bounds':{'x':0,'y':0,'width':1000,'height':700}},
+   {'role':'label','name':'target'},
+   {'role':'list','name':'Messages','bounds':{'x':280,'y':100,'width':600,'height':400},'children':[item]},
+   {'role':'text','name':'target','states':['EDITABLE']}]}
+ def test_visible_source_is_located_without_any_scroll(self):
+  tree=self.fixture()
+  with mock.patch.object(reply,'tree',return_value=tree), mock.patch.object(reply.subprocess,'run',side_effect=AssertionError('visible source must not scroll')):
+   found=reply.locate_source([row(1,'source')],1,'target',100)
+  self.assertEqual(found['name'],'source')
+ def test_preview_of_visible_source_never_scrolls_or_sends(self):
+  state={'quoted':False}
+  quote={'role':'menu-item','name':'Quote','bounds':{'x':0,'y':0,'width':1,'height':1}}
+  cancel={'role':'push-button','name':'cancel'}
+  def tree():
+   t=self.fixture();t['children'].append(quote)
+   if state['quoted']:t['children'].append({'role':'invalid','name':"Quote Sender's message: source"})
+   return t
+  def click(n,*args,**kw):
+   if n is quote:state['quoted']=True
+   if n is cancel:state['quoted']=False
+  def api(request,**kw):
+   from io import BytesIO
+   import json
+   url=request.full_url
+   value=({'loggedInUser':'account'} if '/status/auth' in url else
+          [{'id':'group@chatroom','isGroup':True,'name':'target'}] if '/chats?' in url else
+          [{'localId':1,'serverId':'123','senderName':'Sender','isSelf':False}])
+   return BytesIO(json.dumps(value).encode())
+  def run(argv,*args,**kw):
+   if argv[0]=='xdotool' or argv[0] in ['/opt/tools/input','/opt/tools/key']:
+    raise AssertionError('visible preview must not scroll, type, or send')
+   return subprocess.CompletedProcess(argv,0,stdout='')
+  params={'accountId':'account','chatId':'group@chatroom','sourceMessageId':'123','sourceText':'source','text':'must not send','previewOnly':True}
+  queries=[[{'db_name':'message_0.db','hex_key':'abc'}],[{'local_id':1,'server_id':123,'type':1,'body':'source'.encode().hex()}]]
+  with mock.patch.dict(reply.os.environ,{'AGENT_WECHAT_TOKEN':'token'}), mock.patch.object(reply.urllib.request,'urlopen',side_effect=api), mock.patch.object(reply,'query',side_effect=queries), mock.patch.object(reply.Path,'exists',return_value=True), mock.patch.object(reply,'tree',side_effect=tree), mock.patch.object(reply,'get_text',return_value=''), mock.patch.object(reply,'click',side_effect=click), mock.patch.object(reply,'quote_cancel_button',return_value=cancel), mock.patch.object(reply.subprocess,'run',side_effect=run), mock.patch.object(reply.time,'sleep'):
+   self.assertEqual(reply.main(params)['status'],'validated')
+  self.assertFalse(state['quoted'])
+ def test_client_restart_is_distinguished_from_changed_chat(self):
+  nodes=list(reply.flatten(self.fixture()))
+  frame=next(n for n in nodes if n.get('role')=='frame');frame['window']['pid']=101
+  with self.assertRaisesRegex(reply.ReplyError,'REPLY_CLIENT_RESTARTED'):
+   reply.require_target(nodes,'target',100)
+ def test_missing_client_is_not_reported_as_changed_chat(self):
+  with self.assertRaisesRegex(reply.ReplyError,'REPLY_CLIENT_UNAVAILABLE'):
+   reply.require_target([], 'target',100)
+ def test_different_chat_is_still_rejected(self):
+  with self.assertRaisesRegex(reply.ReplyError,'REPLY_TARGET_CHANGED'):
+   reply.require_target(list(reply.flatten(self.fixture())),'other',100)
+ def test_unavailable_source_uses_paced_bounded_scroll(self):
+  with mock.patch.object(reply,'tree',return_value=self.fixture('other')), mock.patch.object(reply.subprocess,'run',return_value=subprocess.CompletedProcess([],0)) as run, mock.patch.object(reply.time,'sleep'):
+   self.assertIsNone(reply.locate_source([row(1,'source'),row(2,'other')],1,'target',100))
+  self.assertEqual(run.call_count,2)
+  for call in run.call_args_list:
+   argv=call.args[0]
+   self.assertLessEqual(int(argv[argv.index('--repeat')+1]),12)
+   self.assertGreaterEqual(int(argv[argv.index('--delay')+1]),80)
 
 if __name__=='__main__':unittest.main()

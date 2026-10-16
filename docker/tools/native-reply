@@ -184,6 +184,50 @@ def chat_ready(nodes, name):
     return len(editors) == 1 and len(frames) == 1
 
 
+def require_target(nodes, name, client_pid):
+    frames = [n for n in nodes if n.get('role') == 'frame'
+              and n.get('name') in ['Weixin', 'WeChat']]
+    if len(frames) != 1:
+        raise ReplyError('REPLY_CLIENT_UNAVAILABLE')
+    if frames[0].get('window', {}).get('pid') != client_pid:
+        raise ReplyError('REPLY_CLIENT_RESTARTED')
+    one(nodes, lambda n: n.get('role') == 'label' and n.get('name') == name,
+        'REPLY_TARGET_CHANGED')
+
+
+def locate_source(rows, local_id, chat_name, client_pid):
+    def snapshot():
+        nodes = list(flatten(tree()))
+        require_target(nodes, chat_name, client_pid)
+        messages = one(nodes, lambda n: n.get('role') == 'list' and n.get('name') == 'Messages',
+                       'REPLY_MESSAGES_UNAVAILABLE')
+        visible = message_nodes(messages)
+        target = fully_visible_target(source_node(rows, visible, local_id), messages)
+        signature = tuple((n.get('name'), tuple(sorted(n.get('bounds', {}).items()))) for n in visible)
+        return messages, target, signature
+
+    messages, target, signature = snapshot()
+    if target:
+        return target
+    # Inspect the current viewport first. Move to recent history in paced batches,
+    # then search older history; never replace an ambiguous source with a guess.
+    for button, count, attempts in [('5', '12', 8), ('4', '6', 32)]:
+        for _ in range(attempts):
+            bounds = messages['bounds']
+            subprocess.run(['xdotool', 'mousemove', str(round(bounds['x'] + bounds['width']/2)),
+                            str(round(bounds['y'] + bounds['height']/2)), 'click',
+                            '--repeat', count, '--delay', '80', button],
+                           capture_output=True, timeout=5, check=True)
+            time.sleep(0.2)
+            messages, target, current = snapshot()
+            if target:
+                return target
+            if current == signature:
+                break
+            signature = current
+    return None
+
+
 def quote_cancel_button(root, expected):
     # Media previews contain a clickable thumbnail. The cancel control is its sibling.
     for parent in flatten(root):
@@ -335,32 +379,8 @@ def main(params):
         raise ReplyError('REPLY_EXISTING_DRAFT')
     if get_text(chat['name']).strip():
         raise ReplyError('REPLY_EXISTING_DRAFT')
-    # Each operation starts from latest messages; an earlier history reply must not hide newer sources.
-    nodes = list(flatten(tree()))
-    messages = one(nodes, lambda n: n.get('role') == 'list' and n.get('name') == 'Messages',
-                   'REPLY_MESSAGES_UNAVAILABLE')
-    mb = messages['bounds']
-    subprocess.run(['xdotool', 'mousemove', str(round(mb['x'] + mb['width']/2)),
-                    str(round(mb['y'] + mb['height']/2)), 'click', '--repeat', '200', '--delay', '5', '5'],
-                   capture_output=True, timeout=8, check=True)
-    time.sleep(0.2)
-    target = None
-    for attempt in range(32):
-        nodes = list(flatten(tree()))
-        one(nodes, lambda n: n.get('role') == 'label' and n.get('name') == chat['name'],
-            'REPLY_TARGET_CHANGED')
-        messages = one(nodes, lambda n: n.get('role') == 'list' and n.get('name') == 'Messages',
-                       'REPLY_MESSAGES_UNAVAILABLE')
-        vb = messages['bounds']
-        visible = message_nodes(messages)
-        target = fully_visible_target(source_node(rows, visible, source['local_id']), messages)
-        if target:
-            break
-        # Bound the search; unavailable history is never substituted with another message.
-        x, y = round(vb['x'] + vb['width']/2), round(vb['y'] + vb['height']/2)
-        subprocess.run(['xdotool', 'mousemove', str(x), str(y), 'click', '--repeat', '6', '4'],
-                       capture_output=True, timeout=5, check=True)
-        time.sleep(0.2)
+    client_pid = frame['window']['pid']
+    target = locate_source(rows, source['local_id'], chat['name'], client_pid)
     if not target:
         raise ReplyError('REPLY_SOURCE_NOT_VISIBLE')
     b = target['bounds']
@@ -398,8 +418,7 @@ def main(params):
         nodes = list(flatten(tree()))
         one(nodes, lambda n: n.get('role') == 'invalid' and n.get('name') == expected,
             'REPLY_QUOTE_PREVIEW_MISMATCH')
-        one(nodes, lambda n: n.get('role') == 'label' and n.get('name') == chat['name'],
-            'REPLY_TARGET_CHANGED')
+        require_target(nodes, chat['name'], client_pid)
         one(nodes, lambda n: n.get('role') == 'push-button' and n.get('name') in ['Send', 'Send(S)']
             and 'DISABLED' not in n.get('states', []), 'REPLY_SEND_UNAVAILABLE')
         before = max(r['local_id'] for r in rows)

@@ -4,7 +4,10 @@ from pathlib import Path
 import unittest
 from unittest import mock
 import subprocess
-loader=importlib.machinery.SourceFileLoader('native_reply',str(Path(__file__).with_name('native-reply')))
+source=Path(__file__).with_name('native-reply')
+if source.with_name('native-reply.finder-original').is_file():
+ source=source.with_name('native-reply.finder-original')
+loader=importlib.machinery.SourceFileLoader('native_reply',str(source))
 spec=importlib.util.spec_from_loader(loader.name,loader);reply=importlib.util.module_from_spec(spec);loader.exec_module(reply)
 
 def row(i,body,kind=1):return {'local_id':i,'type':kind,'body':body}

@@ -92,9 +92,11 @@ class ViewportContextTests(unittest.TestCase):
  def test_partial_source_cannot_be_clicked_outside_viewport(self):
   target={'bounds':{'x':0,'y':0,'width':300,'height':150}}
   messages={'bounds':{'x':0,'y':100,'width':300,'height':300}}
-  self.assertIsNone(reply.fully_visible_target(target,messages))
+  region=reply.clickable_target(target,messages)
+  self.assertGreaterEqual(region['bounds']['y'],100)
+  self.assertLessEqual(region['bounds']['y']+region['bounds']['height'],150)
   target['bounds']['y']=120
-  self.assertIs(reply.fully_visible_target(target,messages),target)
+  self.assertEqual(reply.clickable_target(target,messages)['bounds']['y'],120)
 
 
 class ReplyViewportSafetyTests(unittest.TestCase):
@@ -184,5 +186,31 @@ class MixedMediaIdentityTests(unittest.TestCase):
   self.assertIs(reply.source_node(rows,visible,3),visible[1])
  def test_unresolved_system_template_is_not_an_identity_anchor(self):
   self.assertFalse(reply.row_matches(row(1,'<sysmsg/>',10000),'unrelated'))
+
+
+class MediaViewportClickTests(unittest.TestCase):
+ fixture=ReplyViewportSafetyTests.fixture
+ def test_partial_voice_is_clicked_only_inside_current_viewport(self):
+  t=self.fixture();msg=t['children'][2];item=msg['children'][0]
+  item['bounds'].update(y=450,height=80)
+  with mock.patch.object(reply,'tree',return_value=t),mock.patch.object(reply.subprocess,'run',side_effect=AssertionError('visible media must not scroll')):
+   found=reply.locate_source([row(1,'source')],1,'target',100)
+  self.assertGreaterEqual(found['bounds']['y'],msg['bounds']['y'])
+  self.assertLessEqual(found['bounds']['y']+found['bounds']['height'],msg['bounds']['y']+msg['bounds']['height'])
+ def test_large_card_has_safe_interior_without_requiring_full_visibility(self):
+  t=self.fixture();msg=t['children'][2];item=msg['children'][0]
+  item['bounds'].update(y=50,height=800)
+  with mock.patch.object(reply,'tree',return_value=t),mock.patch.object(reply.subprocess,'run',side_effect=AssertionError('large card must not scroll')):
+   found=reply.locate_source([row(1,'source')],1,'target',100)
+  self.assertIsNotNone(found)
+  self.assertGreaterEqual(found['bounds']['y'],100)
+  self.assertLessEqual(found['bounds']['y']+found['bounds']['height'],500)
+ def test_tiny_bottom_edge_is_aligned_down_one_tick(self):
+  first=self.fixture();first['children'][2]['children'][0]['bounds'].update(y=480,height=70)
+  second=self.fixture();second['children'][2]['children'][0]['bounds'].update(y=420,height=70)
+  with mock.patch.object(reply,'tree',side_effect=[first,second]),mock.patch.object(reply.subprocess,'run',return_value=subprocess.CompletedProcess([],0)) as run,mock.patch.object(reply.time,'sleep'):
+   self.assertIsNotNone(reply.locate_source([row(1,'source')],1,'target',100))
+  self.assertEqual(run.call_count,1)
+  argv=run.call_args.args[0];self.assertEqual(argv[-1],'5');self.assertEqual(argv[argv.index('--repeat')+1],'1')
 
 if __name__=='__main__':unittest.main()

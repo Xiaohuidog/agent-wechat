@@ -181,14 +181,20 @@ def message_nodes(messages):
             and not (n['bounds']['height'] <= 45 and time_label.fullmatch(n.get('name', '')))]
 
 
-def fully_visible_target(target, messages):
+def clickable_target(target, messages):
     if target is None:
         return None
     box, viewport = target['bounds'], messages['bounds']
-    if (box['y'] < viewport['y']
-            or box['y'] + box['height'] > viewport['y'] + viewport['height']):
+    left = max(box['x'], viewport['x'] + 4)
+    right = min(box['x'] + box['width'], viewport['x'] + viewport['width'] - 4)
+    top = max(box['y'], viewport['y'] + 4)
+    bottom = min(box['y'] + box['height'], viewport['y'] + viewport['height'] - 4)
+    # The source identity is already verified. Keep both the bubble-side offset
+    # and the vertical click inside this source's visible interior.
+    if right - left < 160 or bottom - top < 40:
         return None
-    return target
+    return {**target, 'bounds': {'x': left, 'y': top,
+                               'width': right - left, 'height': bottom - top}}
 
 
 def source_node(rows, visible, local_id):
@@ -247,24 +253,38 @@ def locate_source(rows, local_id, chat_name, client_pid):
         messages = one(nodes, lambda n: n.get('role') == 'list' and n.get('name') == 'Messages',
                        'REPLY_MESSAGES_UNAVAILABLE')
         visible = message_nodes(messages)
-        target = fully_visible_target(source_node(rows, visible, local_id), messages)
+        source = source_node(rows, visible, local_id)
+        target = clickable_target(source, messages)
         signature = tuple((n.get('name'), tuple(sorted(n.get('bounds', {}).items()))) for n in visible)
-        return messages, target, signature
+        return messages, target, signature, source
 
-    messages, target, signature = snapshot()
+    def scroll(messages, button, count):
+        bounds = messages['bounds']
+        subprocess.run(['xdotool', 'mousemove', str(round(bounds['x'] + bounds['width']/2)),
+                        str(round(bounds['y'] + bounds['height']/2)), 'click',
+                        '--repeat', count, '--delay', '80', button],
+                       capture_output=True, timeout=5, check=True)
+        time.sleep(0.2)
+
+    def align(state):
+        for _ in range(4):
+            messages, target, signature, source = state
+            if target or source is None:
+                return state
+            button = '4' if source['bounds']['y'] < messages['bounds']['y'] else '5'
+            scroll(messages, button, '1')
+            state = snapshot()
+        return state
+
+    messages, target, signature, source = align(snapshot())
     if target:
         return target
-    # Inspect the current viewport first. Move to recent history in paced batches,
-    # then search older history; never replace an ambiguous source with a guess.
+    # Inspect the current viewport first, then recent and older history in paced
+    # batches. An identified partial source is aligned, never blindly skipped.
     for button, count, attempts in [('5', '12', 8), ('4', '6', 32)]:
         for _ in range(attempts):
-            bounds = messages['bounds']
-            subprocess.run(['xdotool', 'mousemove', str(round(bounds['x'] + bounds['width']/2)),
-                            str(round(bounds['y'] + bounds['height']/2)), 'click',
-                            '--repeat', count, '--delay', '80', button],
-                           capture_output=True, timeout=5, check=True)
-            time.sleep(0.2)
-            messages, target, current = snapshot()
+            scroll(messages, button, count)
+            messages, target, current, source = align(snapshot())
             if target:
                 return target
             if current == signature:

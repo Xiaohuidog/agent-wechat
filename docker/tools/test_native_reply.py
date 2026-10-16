@@ -113,16 +113,20 @@ class ReplyViewportSafetyTests(unittest.TestCase):
    found=reply.locate_source([row(1,'source')],1,'target',100)
   self.assertEqual(found['name'],'source')
  def test_preview_of_visible_source_never_scrolls_or_sends(self):
-  state={'quoted':False}
+  state={'quoted':False,'menu_requested':False,'menu_reads':0}
   quote={'role':'menu-item','name':'Quote','bounds':{'x':0,'y':0,'width':1,'height':1}}
   cancel={'role':'push-button','name':'cancel'}
   def tree():
-   t=self.fixture();t['children'].append(quote)
+   t=self.fixture()
+   if state['menu_requested'] and not state['quoted']:
+    state['menu_reads']+=1
+    if state['menu_reads']>=2:t['children'].append(quote)
    if state['quoted']:t['children'].append({'role':'invalid','name':"Quote Sender's message: source"})
    return t
   def click(n,*args,**kw):
+   if kw.get('button')==3:state['menu_requested']=True
    if n is quote:state['quoted']=True
-   if n is cancel:state['quoted']=False
+   if n is cancel:state['quoted']=False;state['menu_requested']=False
   def api(request,**kw):
    from io import BytesIO
    import json
@@ -212,5 +216,25 @@ class MediaViewportClickTests(unittest.TestCase):
    self.assertIsNotNone(reply.locate_source([row(1,'source')],1,'target',100))
   self.assertEqual(run.call_count,1)
   argv=run.call_args.args[0];self.assertEqual(argv[-1],'5');self.assertEqual(argv[argv.index('--repeat')+1],'1')
+
+
+class QuoteMenuReadinessTests(unittest.TestCase):
+ def test_menu_can_arrive_on_second_snapshot(self):
+  first=ReplyViewportSafetyTests().fixture();second=ReplyViewportSafetyTests().fixture()
+  quote={'role':'menu-item','name':'Quote','states':[]};second['children'].append(quote)
+  with mock.patch.object(reply,'tree',side_effect=[first,second]),mock.patch.object(reply.time,'sleep'):
+   self.assertIs(reply.wait_for_quote('target',100),quote)
+ def test_menu_wait_remains_bounded(self):
+  with mock.patch.object(reply,'tree',return_value=ReplyViewportSafetyTests().fixture()) as tree,mock.patch.object(reply.time,'sleep'),self.assertRaisesRegex(reply.ReplyError,'REPLY_QUOTE_MENU_UNAVAILABLE'):
+   reply.wait_for_quote('target',100)
+  self.assertEqual(tree.call_count,4)
+ def test_menu_wait_rejects_changed_client(self):
+  t=ReplyViewportSafetyTests().fixture();t['children'][0]['window']['pid']=101
+  with mock.patch.object(reply,'tree',return_value=t),self.assertRaisesRegex(reply.ReplyError,'REPLY_CLIENT_RESTARTED'):
+   reply.wait_for_quote('target',100)
+ def test_disabled_quote_is_not_clicked(self):
+  t=ReplyViewportSafetyTests().fixture();t['children'].append({'role':'menu-item','name':'Quote','states':['DISABLED']})
+  with mock.patch.object(reply,'tree',return_value=t),mock.patch.object(reply.time,'sleep'),self.assertRaisesRegex(reply.ReplyError,'REPLY_QUOTE_MENU_UNAVAILABLE'):
+   reply.wait_for_quote('target',100)
 
 if __name__=='__main__':unittest.main()

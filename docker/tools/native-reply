@@ -246,6 +246,20 @@ def require_target(nodes, name, client_pid):
         'REPLY_TARGET_CHANGED')
 
 
+def wait_for_quote(chat_name, client_pid):
+    for attempt in range(4):
+        nodes = list(flatten(tree()))
+        require_target(nodes, chat_name, client_pid)
+        matches = [n for n in nodes if n.get('role') == 'menu-item' and n.get('name') == 'Quote']
+        if len(matches) > 1:
+            raise ReplyError('REPLY_QUOTE_MENU_UNAVAILABLE')
+        if len(matches) == 1 and 'DISABLED' not in (matches[0].get('states') or []):
+            return matches[0]
+        if attempt < 3:
+            time.sleep(0.2)
+    raise ReplyError('REPLY_QUOTE_MENU_UNAVAILABLE')
+
+
 def locate_source(rows, local_id, chat_name, client_pid):
     def snapshot():
         nodes = list(flatten(tree()))
@@ -451,10 +465,8 @@ def main(params):
     b = target['bounds']
     offset = b['width'] - 74 if source_wire[0].get('isSelf') else 74
     click(target, button=3, x_offset=offset)
-    nodes = list(flatten(tree()))
     try:
-        quote = one(nodes, lambda n: n.get('role') == 'menu-item' and n.get('name') == 'Quote',
-                    'REPLY_QUOTE_MENU_UNAVAILABLE')
+        quote = wait_for_quote(chat['name'], client_pid)
     except ReplyError:
         subprocess.run(['/opt/tools/key', 'Escape'], capture_output=True, timeout=5)
         raise

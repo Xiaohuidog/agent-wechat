@@ -168,7 +168,7 @@ class NativeImageSaveTest(unittest.TestCase):
 
         self.assertEqual(image_download.unique_chat_item(tree, "群测试"), target)
         with self.assertRaisesRegex(image_download.DownloadError, "CHAT_IDENTITY_AMBIGUOUS"):
-            image_download.unique_chat_item({"children": [target, target]}, "群测试")
+            image_download.unique_chat_item({"children": [target, {**target, "bounds": {**target["bounds"], "y": 450}}]}, "群测试")
 
     def test_publishes_decoded_clipboard_image_at_full_resolution(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -286,3 +286,77 @@ class NativeImageSaveTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ChatIdentityRegressionTest(unittest.TestCase):
+    def row(self, y=200, name='群测试'):
+        return {'role': 'list-item', 'name': name,
+                'bounds': {'x': 280, 'y': y, 'width': 240, 'height': 68}}
+
+    def test_duplicate_accessibility_projection_is_one_visual_target(self):
+        row = self.row()
+        self.assertEqual(image_download.unique_chat_item({'children': [row, dict(row)]}, '群测试'), row)
+
+    def test_message_content_cannot_be_selected_as_conversation(self):
+        row = self.row()
+        message = self.row(300)
+        value = {'children': [row, {'role': 'list', 'name': 'Messages', 'children': [message]}]}
+        self.assertEqual(image_download.unique_chat_item(value, '群测试'), row)
+
+    def test_two_distinct_conversations_still_fail_closed(self):
+        with self.assertRaisesRegex(image_download.DownloadError, 'CHAT_IDENTITY_AMBIGUOUS'):
+            image_download.unique_chat_item({'children': [self.row(), self.row(300)]}, '群测试')
+
+    def test_known_longer_group_name_is_not_target_prefix(self):
+        value = {'children': [self.row(name='群测试 二群 张三: [Photo]')]}
+        with self.assertRaisesRegex(image_download.DownloadError, 'CHAT_UI_NOT_FOUND'):
+            image_download.unique_chat_item(value, '群测试', known_names=['群测试', '群测试 二群'])
+
+    def test_wrong_open_header_overrides_stale_selected_sidebar(self):
+        row = {**self.row(), 'states': ['SELECTED']}
+        value = {'children': [row, {'role': 'label', 'name': '其他群'},
+                              {'role': 'list', 'name': 'Messages'}]}
+        self.assertFalse(image_download.selected_chat(value, '群测试'))
+
+
+def test_historical_match_can_select_older_unique_thumbnail_but_not_newest_guess():
+    screenshot = Image.new('RGB', (800, 600), '#eeeeee')
+    target = Image.new('RGB', (40, 60), '#234b72')
+    for x in range(8, 32):
+        for y in range(12, 48):
+            target.putpixel((x, y), (230, 180, 40))
+    screenshot.paste(target.resize((80, 120)), (180, 130))
+    rows = [dict(role='list-item', name='Image', bounds=dict(x=100, y=y, width=600, height=150)) for y in (110, 330)]
+    assert image_download.find_unique_match(screenshot, target, rows, historical=True)['row'] == rows[0]
+    with __import__('pytest').raises(image_download.DownloadError, match='IMAGE_NOT_NEWEST_VISIBLE_MESSAGE'):
+        image_download.find_unique_match(screenshot, target, rows)
+
+
+def test_historical_image_requires_hash_bound_native_cache_not_clipboard():
+    from unittest.mock import Mock
+    native = Mock(side_effect=image_download.DownloadError('IMAGE_NATIVE_DECODE_MISSING'))
+    with patch.object(image_download, 'publish_native_image', native), \
+         patch.object(image_download, 'copy_viewer_image') as clipboard:
+        with __import__('pytest').raises(image_download.DownloadError, match='IMAGE_NATIVE_DECODE_MISSING'):
+            image_download.publish_viewer_result('native', 'directory', 'stem', 42, 'preview', historical=True)
+        clipboard.assert_not_called()
+        assert native.call_args.kwargs['timeout_seconds'] == 20
+
+
+def test_chat_identity_uses_stable_id_and_rejects_duplicate_display_names():
+    import json
+    from unittest.mock import patch
+    chats = [{'id': 'one@chatroom', 'name': '群测试'}, {'id': 'two@chatroom', 'name': '群测试'}]
+    with patch.object(image_download.pathlib.Path, 'read_text', return_value='token'), \
+         patch.object(image_download.urllib.request, 'urlopen', return_value=io.BytesIO(json.dumps(chats).encode())):
+        with __import__('pytest').raises(image_download.DownloadError, match='CHAT_IDENTITY_AMBIGUOUS'):
+            image_download.verify_chat_identity('one@chatroom', '群测试')
+
+
+def test_chat_identity_rejects_renamed_or_changed_target_before_ui():
+    import json
+    chats = [{'id': 'one@chatroom', 'name': '新群名'}]
+    with patch.object(image_download.pathlib.Path, 'read_text', return_value='token'), \
+         patch.object(image_download.urllib.request, 'urlopen', return_value=io.BytesIO(json.dumps(chats).encode())):
+        with __import__('pytest').raises(image_download.DownloadError, match='CHAT_IDENTITY_CHANGED'):
+            image_download.verify_chat_identity('one@chatroom', '群测试')

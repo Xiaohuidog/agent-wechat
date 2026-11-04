@@ -171,7 +171,7 @@ def _best_row_match(screenshot, target, row):
     return best
 
 
-def find_unique_match(screenshot, target, rows, threshold=0.18):
+def find_unique_match(screenshot, target, rows, threshold=0.18, historical=False):
     matches = []
     for row in rows:
         bounds = row.get("bounds") or {}
@@ -199,19 +199,19 @@ def find_unique_match(screenshot, target, rows, threshold=0.18):
         raise DownloadError("IMAGE_IDENTITY_AMBIGUOUS")
     match = matches[0]
     newest_y = max(float((row.get("bounds") or {}).get("y", -1)) for row in rows)
-    if float(match["row"]["bounds"]["y"]) != newest_y:
+    if not historical and float(match["row"]["bounds"]["y"]) != newest_y:
         raise DownloadError("IMAGE_NOT_NEWEST_VISIBLE_MESSAGE")
     return match
 
 
-def find_image_match_in_chat(target, geometry):
+def find_image_match_in_chat(target, geometry, historical=False):
     scroll_x = round(geometry["X"] + geometry["WIDTH"] * 0.72)
     scroll_y = round(geometry["Y"] + geometry["HEIGHT"] * 0.50)
     for attempt in range(9):
         rows = image_rows(tree(), geometry)
         if rows:
             try:
-                return find_unique_match(capture(), target, rows)
+                return find_unique_match(capture(), target, rows, historical=historical)
             except DownloadError as error:
                 if str(error) != "IMAGE_CARD_NOT_FOUND":
                     raise
@@ -343,53 +343,101 @@ def publish_native_image(native_path, image_dir, stem, local_id, preview_path, t
     return size
 
 
-def selected_chat(value, chat_name):
-    selected_row = any(
-        item.get("role") == "list-item"
-        and "SELECTED" in (item.get("states") or [])
-        and (
-            item.get("name") == chat_name
-            or str(item.get("name") or "").startswith(chat_name + " ")
-        )
-        for item in walk(value)
-    )
-    open_header = any(
-        item.get("role") == "label" and item.get("name") == chat_name
-        for item in walk(value)
-    )
-    message_list = any(
-        item.get("role") == "list" and item.get("name") == "Messages"
-        for item in walk(value)
-    )
-    return selected_row or (open_header and message_list)
+def chat_scope(value):
+    frames = [node for node in walk(value)
+              if node.get("role") == "frame" and node.get("name") in {"Weixin", "WeChat"}]
+    if len(frames) > 1:
+        raise DownloadError("CHAT_WINDOW_AMBIGUOUS")
+    return frames[0] if frames else value
 
 
-def unique_chat_item(value, chat_name):
-    matches = [
-        item for item in walk(value)
-        if item.get("role") == "list-item"
-        and isinstance(item.get("name"), str)
-        and (item["name"] == chat_name or item["name"].startswith(chat_name + " "))
-        and item.get("bounds")
-    ]
+def conversation_nodes(value):
+    # Message bodies can contain a group's name; they are never navigation targets.
+    if isinstance(value, dict):
+        if value.get("role") == "list" and value.get("name") == "Messages":
+            return
+        yield value
+        for child in value.get("children") or []:
+            yield from conversation_nodes(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from conversation_nodes(child)
+
+
+def chat_row_matches(item, chat_name, known_names=()):
+    name = str(item.get("name") or "")
+    if item.get("role") != "list-item" or not (name == chat_name or name.startswith(chat_name + " ") or name.startswith(chat_name + "\n")):
+        return False
+    # WeChat puts the last message on the same accessible line as the name.
+    # Prefer a longer, known conversation name over an ambiguous prefix.
+    return not any(other != chat_name and len(other) > len(chat_name)
+                   and (name == other or name.startswith(other + " ") or name.startswith(other + "\n"))
+                   for other in known_names)
+
+
+def selected_chat(value, chat_name, known_names=()):
+    nodes = list(walk(chat_scope(value)))
+    messages = any(n.get("role") == "list" and n.get("name") == "Messages" for n in nodes)
+    if messages:
+        # A stale SELECTED flag must not override the currently open header.
+        return sum(n.get("role") == "label" and n.get("name") == chat_name for n in nodes) == 1
+    return any(chat_row_matches(n, chat_name, known_names) and "SELECTED" in (n.get("states") or [])
+               for n in conversation_nodes(chat_scope(value)))
+
+
+def unique_chat_item(value, chat_name, known_names=()):
+    matches = {}
+    for item in conversation_nodes(chat_scope(value)):
+        if not chat_row_matches(item, chat_name, known_names) or not item.get("bounds"):
+            continue
+        bounds = item["bounds"]
+        # Small search suggestions are not actual conversation rows.
+        if float(bounds.get("height", 0)) < 48:
+            continue
+        key = tuple(float(bounds.get(k, 0)) for k in ("x", "y", "width", "height"))
+        matches.setdefault(key, item)
     if not matches:
         raise DownloadError("CHAT_UI_NOT_FOUND")
-    if len(matches) > 1:
-        ranked = sorted(matches, key=lambda item: float(item["bounds"].get("height", 0)), reverse=True)
-        if (float(ranked[0]["bounds"].get("height", 0)) < 48
-                or float(ranked[0]["bounds"].get("height", 0))
-                - float(ranked[1]["bounds"].get("height", 0)) < 16):
+    if len(matches) != 1:
+        raise DownloadError("CHAT_IDENTITY_AMBIGUOUS")
+    return next(iter(matches.values()))
+
+
+def verify_chat_identity(chat_id, chat_name):
+    try:
+        token = pathlib.Path("/data/auth-token").read_text().strip()
+        if not token:
+            raise ValueError("empty token")
+        chats = []
+        for offset in range(0, 10000, 200):
+            request = urllib.request.Request(
+                f"http://127.0.0.1:6174/api/chats?limit=200&offset={offset}",
+                headers={"Authorization": f"Bearer {token}"})
+            with urllib.request.urlopen(request, timeout=15) as response:
+                page = json.load(response)
+            if not isinstance(page, list):
+                raise ValueError("invalid chats")
+            chats.extend(page)
+            if len(page) < 200:
+                break
+        else:
+            raise ValueError("incomplete chats")
+        target = [c for c in chats if c.get("id") == chat_id and c.get("name") == chat_name]
+        if len(target) != 1:
+            raise DownloadError("CHAT_IDENTITY_CHANGED")
+        if sum(str(c.get("name", "")).casefold() == chat_name.casefold() for c in chats) != 1:
             raise DownloadError("CHAT_IDENTITY_AMBIGUOUS")
-        return ranked[0]
-    return matches[0]
+        return [c["name"] for c in chats if isinstance(c.get("name"), str)]
+    except (OSError, ValueError, TypeError) as error:
+        raise DownloadError("CHAT_IDENTITY_UNAVAILABLE") from error
 
 
-def select_chat(chat_name):
+def select_chat(chat_name, known_names=()):
     current = tree()
-    if selected_chat(current, chat_name):
+    if selected_chat(current, chat_name, known_names):
         return
     try:
-        item = unique_chat_item(current, chat_name)
+        item = unique_chat_item(current, chat_name, known_names)
     except DownloadError as error:
         if str(error) != "CHAT_UI_NOT_FOUND":
             raise
@@ -408,7 +456,7 @@ def select_chat(chat_name):
         while time.monotonic() < deadline:
             current = tree()
             try:
-                item = unique_chat_item(current, chat_name)
+                item = unique_chat_item(current, chat_name, known_names)
                 break
             except DownloadError as retry_error:
                 if str(retry_error) != "CHAT_UI_NOT_FOUND":
@@ -423,7 +471,7 @@ def select_chat(chat_name):
     command("xdotool", "mousemove", str(x), str(y), "click", "1")
     deadline = time.monotonic() + 8
     while time.monotonic() < deadline:
-        if selected_chat(tree(), chat_name):
+        if selected_chat(tree(), chat_name, known_names):
             return
         time.sleep(0.4)
     raise DownloadError("CHAT_UI_SELECT_UNCONFIRMED")
@@ -478,12 +526,26 @@ def copy_viewer_image(preview_path):
     raise DownloadError("IMAGE_CLIPBOARD_INVALID" if invalid_image_seen else "IMAGE_CLIPBOARD_UNAVAILABLE")
 
 
+def publish_viewer_result(native_path, image_dir, stem, local_id, preview_path, historical=False):
+    try:
+        size = publish_native_image(native_path, image_dir, stem, local_id, preview_path,
+                                    timeout_seconds=20 if historical else 0)
+        return size, "wechat-native-cache"
+    except DownloadError as error:
+        # A thumbnail match locates a candidate, but only the requested file hash
+        # proves a historical image's identity. Never copy an unrelated viewer.
+        if historical or str(error) != "IMAGE_NATIVE_DECODE_MISSING":
+            raise
+        return copy_viewer_image(preview_path), "viewer-clipboard"
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--chat-id", required=True)
     parser.add_argument("--chat-name", required=True)
     parser.add_argument("--local-id", required=True, type=int)
     parser.add_argument("--thumbnail")
+    parser.add_argument("--historical", action="store_true")
     parser.add_argument("--preview-path", required=True)
     parser.add_argument("--image-dir", required=True)
     parser.add_argument("--stem", required=True)
@@ -509,6 +571,8 @@ def main():
         fail("IMAGE_TARGET_PATH_INVALID")
     if pathlib.Path(args.preview_path) != image_dir / f"{args.stem}_preview.jpg":
         fail("IMAGE_TARGET_PATH_INVALID")
+    if args.historical and not args.thumbnail:
+        fail("IMAGE_HISTORY_REFERENCE_REQUIRED")
     try:
         native_path = native_image_path(image_dir, args.stem)
         variant = "wechat-native-cache"
@@ -516,18 +580,19 @@ def main():
             size = publish_native_image(native_path, image_dir, args.stem, args.local_id, args.preview_path)
             print(json.dumps({"ok": True, "sizeBytes": size, "variant": "wechat-native-cache"}))
             return
+        known_names = verify_chat_identity(args.chat_id, args.chat_name)
         geometry = weixin_geometry()
-        select_chat(args.chat_name)
+        select_chat(args.chat_name, known_names)
         time.sleep(1)
-        # The database gate guarantees this is the newest message. Move the
-        # message view to its end, then require a unique visual identity match.
+        # Start from the end and search within a bounded message window.
+        # Historical matches additionally require the requested native file hash.
         scroll_x = round(geometry["X"] + geometry["WIDTH"] * 0.72)
         scroll_y = round(geometry["Y"] + geometry["HEIGHT"] * 0.50)
         command("xdotool", "mousemove", str(scroll_x), str(scroll_y), "click", "--repeat", "10", "--delay", "50", "5")
         time.sleep(0.8)
         if args.thumbnail:
             with Image.open(args.thumbnail) as target_image:
-                match = find_image_match_in_chat(target_image.convert("RGB"), geometry)
+                match = find_image_match_in_chat(target_image.convert("RGB"), geometry, historical=args.historical)
         else:
             side = image_message_side(args.chat_id, args.local_id)
             match = find_newest_image_in_chat(geometry, side=side)
@@ -540,16 +605,10 @@ def main():
             raise DownloadError("IMAGE_CLIPBOARD_CLEAR_FAILED")
         command("xdotool", "mousemove", str(match["x"]), str(match["y"]), "click", "1")
         try:
-            try:
-                size = publish_native_image(
-                    native_path, image_dir, args.stem, args.local_id,
-                    args.preview_path, timeout_seconds=0,
-                )
-            except DownloadError as error:
-                if str(error) != "IMAGE_NATIVE_DECODE_MISSING":
-                    raise
-                size = copy_viewer_image(args.preview_path)
-                variant = "viewer-clipboard"
+            size, variant = publish_viewer_result(
+                native_path, image_dir, args.stem, args.local_id,
+                args.preview_path, historical=args.historical,
+            )
         finally:
             command("xdotool", "key", "--clearmodifiers", "Escape", check=False)
     except (DownloadError, json.JSONDecodeError) as error:

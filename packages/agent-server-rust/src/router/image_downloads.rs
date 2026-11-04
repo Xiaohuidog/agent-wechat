@@ -67,6 +67,10 @@ fn is_latest_image(local_id: i64, latest_image_local_id: Option<i64>) -> bool {
     latest_image_local_id == Some(local_id)
 }
 
+fn can_locate_image(historical: bool, has_thumbnail: bool) -> bool {
+    !historical || has_thumbnail
+}
+
 #[cfg(test)]
 fn is_resettable_error(error_code: &str) -> bool {
     RESETTABLE_ERRORS.contains(&error_code)
@@ -182,11 +186,12 @@ async fn run(id: String) {
         update_state(&id, "failed", Some("IMAGE_CHAT_NOT_FOUND"));
         return;
     };
-    if !is_latest_image(
+    let historical = !is_latest_image(
         operation.local_id,
         latest_image_local_id(&account_dir, &keys, &operation.chat_id),
-    ) {
-        update_state(&id, "failed", Some("IMAGE_NOT_LATEST_IMAGE"));
+    );
+    if !can_locate_image(historical, cached.data.is_some()) {
+        update_state(&id, "failed", Some("IMAGE_HISTORY_REFERENCE_REQUIRED"));
         return;
     }
     let Some(target) = get_image_download_cache_target(
@@ -216,6 +221,9 @@ async fn run(id: String) {
         "--preview-path".to_string(),
         preview_path.to_string_lossy().to_string(),
     ];
+    if historical {
+        args.push("--historical".to_string());
+    }
     if let Some(thumbnail_data) = cached.data.as_deref() {
         let Ok(thumbnail_bytes) = base64::engine::general_purpose::STANDARD.decode(thumbnail_data)
         else {
@@ -378,6 +386,13 @@ mod tests {
     fn rejects_an_older_image() {
         assert!(!is_latest_image(41, Some(42)));
         assert!(!is_latest_image(41, None));
+    }
+
+    #[test]
+    fn history_requires_a_source_thumbnail_and_native_identity_validation() {
+        assert!(can_locate_image(false, false));
+        assert!(can_locate_image(true, true));
+        assert!(!can_locate_image(true, false));
     }
 
     #[test]

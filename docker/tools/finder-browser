@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
 import time
 from http import HTTPStatus
@@ -59,12 +60,29 @@ def resolved_share_url(payload: Any) -> str | None:
 
 class FinderBrowser:
     def __init__(self) -> None:
+        self._context = None
+        self._playwright = None
+        self._page = None
+        self._minimized = False
+        self._active = False
+        self._last_used = time.monotonic()
+
+    def _ensure_started(self) -> None:
+        if self._context is not None:
+            return
         from playwright.sync_api import sync_playwright
 
         profile = Path(os.environ.get("FINDER_BROWSER_PROFILE", "/home/wechat/.finder-browser-profile"))
         profile.mkdir(mode=0o700, parents=True, exist_ok=True)
         profile.chmod(0o700)
         self._playwright = sync_playwright().start()
+        try:
+            self._launch_context(profile)
+        except Exception:
+            self.close()
+            raise
+
+    def _launch_context(self, profile) -> None:
         self._context = self._playwright.chromium.launch_persistent_context(
             str(profile),
             headless=False,
@@ -79,8 +97,21 @@ class FinderBrowser:
         self._minimized = False
 
     def close(self) -> None:
-        self._context.close()
-        self._playwright.stop()
+        context, driver = self._context, self._playwright
+        self._context = self._playwright = self._page = None
+        self._minimized = False
+        try:
+            if context is not None:
+                context.close()
+        finally:
+            if driver is not None:
+                driver.stop()
+
+    def maintain(self) -> None:
+        # The HTTP server is single-threaded: maintenance runs only between requests.
+        # Health checks deliberately do not extend the idle deadline.
+        if self._context is not None and not self._active and time.monotonic() - self._last_used >= 300:
+            self.close()
 
     def _fetch(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
         result = self._page.evaluate(
@@ -109,6 +140,8 @@ class FinderBrowser:
         return result if isinstance(result, dict) else {"ok": False, "status": 0, "json": None}
 
     def status(self) -> str:
+        if self._page is None:
+            return "idle"
         if not self._page.url.startswith(FINDER_ORIGIN):
             try:
                 self._page.goto(POST_LIST_URL, wait_until="domcontentloaded", timeout=30_000)
@@ -125,6 +158,15 @@ class FinderBrowser:
         return "unavailable"
 
     def resolve(self, object_id: str, nonce_id: str, scene: int) -> str:
+        self._active = True
+        try:
+            self._ensure_started()
+            return self._resolve(object_id, nonce_id, scene)
+        finally:
+            self._active = False
+            self._last_used = time.monotonic()
+
+    def _resolve(self, object_id: str, nonce_id: str, scene: int) -> str:
         if self.status() != "logged_in":
             raise PermissionError("FINDER_BROWSER_LOGIN_REQUIRED")
         result = self._fetch(
@@ -142,6 +184,8 @@ class FinderBrowser:
         return link
 
     def show(self) -> str:
+        self._ensure_started()
+        self._last_used = time.monotonic()
         if not self._page.url.startswith(FINDER_ORIGIN):
             self._page.goto(POST_LIST_URL, wait_until="domcontentloaded", timeout=30_000)
         subprocess.run(
@@ -230,6 +274,9 @@ class FinderHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    def stop(_signum, _frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, stop)
     browser = FinderBrowser()
     FinderHandler.browser = browser
     server = HTTPServer(("127.0.0.1", int(os.environ.get("FINDER_BROWSER_PORT", "9223"))), FinderHandler)
@@ -240,7 +287,7 @@ def main() -> None:
             server.handle_request()
             if time.monotonic() - last_check >= 5:
                 try:
-                    browser.status()
+                    browser.maintain()
                 except Exception:
                     pass
                 last_check = time.monotonic()

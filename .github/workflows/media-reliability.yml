@@ -1,12 +1,12 @@
 name: Media reliability
 on:
-  push:
-    branches: [codex/media-reliability-20261104]
-  pull_request:
-    paths:
-      - 'docker/tools/**'
-      - 'packages/agent-server-rust/**'
-      - '.github/workflows/media-reliability.yml'
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Exact source commit to test and build
+        required: true
+        default: ed68d118c636a570bf5ce4dada205e45315a565e
+        type: string
 permissions:
   contents: read
 jobs:
@@ -15,6 +15,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+      - run: git rev-parse HEAD > source-commit.txt
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -33,8 +36,9 @@ jobs:
       - run: sha256sum packages/agent-server-rust/target/release/agent-server > agent-server.sha256
       - uses: actions/upload-artifact@v4
         with:
-          name: agent-server-linux-amd64-${{ github.sha }}
+          name: agent-server-linux-amd64-${{ github.run_id }}
           path: |
             packages/agent-server-rust/target/release/agent-server
             agent-server.sha256
+            source-commit.txt
           retention-days: 7

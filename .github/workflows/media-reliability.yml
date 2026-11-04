@@ -1,0 +1,44 @@
+name: Media reliability
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Exact source commit to test and build
+        required: true
+        default: ed68d118c636a570bf5ce4dada205e45315a565e
+        type: string
+permissions:
+  contents: read
+jobs:
+  media:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+      - run: git rev-parse HEAD > source-commit.txt
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install pytest pillow
+      - run: python -m pytest docker/tools/test_image_download.py docker/tools/test_finder_browser.py -q -W ignore::DeprecationWarning
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            packages/agent-server-rust/target
+          key: media-rust-ubuntu22-${{ hashFiles('packages/agent-server-rust/Cargo.lock') }}
+      - run: cargo test --locked --manifest-path packages/agent-server-rust/Cargo.toml
+      - run: cargo build --release --locked --manifest-path packages/agent-server-rust/Cargo.toml
+      - run: sha256sum packages/agent-server-rust/target/release/agent-server > agent-server.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-server-linux-amd64-${{ github.run_id }}
+          path: |
+            packages/agent-server-rust/target/release/agent-server
+            agent-server.sha256
+            source-commit.txt
+          retention-days: 7

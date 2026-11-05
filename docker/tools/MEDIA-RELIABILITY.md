@@ -59,7 +59,12 @@ Verification: 37 image-helper tests and 87 Linux Rust tests passed. The recovere
 image was opened from its real dashboard card at full 1080x1826 resolution,
 583858 bytes. Production binary SHA-256:
 `508fd5628201c09a1193d1f99d6cd5b053a2fb1572e32222d1154aa728fa7264`.
-The WeChat PID remained unchanged across the Agent binary deployment. A fresh
-post-deployment first-attempt image is still required for final automatic-path
-acceptance. No recovered resource key was stored; current resource DB decoding
+The WeChat PID remained unchanged across the Agent binary deployment. Fresh post-deployment acceptance passed at 2026-11-05 10:21 CST:
+Group Test record `c5525822dd6e` (localId 274) completed its first Agent attempt
+from 10:20:17 to 10:20:22 without manual retries. The same dashboard operation
+became ready at 10:20:30, and its fullscreen original decoded at 800x1131,
+327607 bytes. Resource SHA-256:
+`f09a38c669ef4589a260c715cec5b7265301e62a0a8fcc41b6c049d703338b14`.
+This verifies both automatic acquisition and actual dashboard original-image
+viewing for the new sample. No recovered resource key was stored; current resource DB decoding
 support remains unresolved.

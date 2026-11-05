@@ -194,12 +194,40 @@ async fn run(id: String) {
         update_state(&id, "failed", Some("IMAGE_HISTORY_REFERENCE_REQUIRED"));
         return;
     }
-    let Some(target) = get_image_download_cache_target(
-        &account_dir,
-        &keys,
-        &operation.chat_id,
-        operation.local_id,
-    ) else {
+    let mut target = get_image_download_cache_target(
+        &account_dir, &keys, &operation.chat_id, operation.local_id,
+    );
+    if target.is_none() && !historical {
+        // A new image may not receive its exact cache identity until its chat
+        // is loaded. Prepare only the verified chat; never guess a file stem.
+        let prepared = exec_command(
+            "/opt/tools/image-download",
+            &["--prepare-only", "--account-id", &account_dir,
+              "--chat-id", &operation.chat_id, "--chat-name", &chat.name,
+              "--local-id", &operation.local_id.to_string()],
+            &ExecOptions { session: Some(session.clone()), timeout_ms: 30_000 },
+        ).await;
+        if prepared.exit_code != 0 {
+            let code = serde_json::from_str::<serde_json::Value>(&prepared.stdout).ok()
+                .and_then(|value| value.get("errorCode")?.as_str().map(str::to_string))
+                .unwrap_or_else(|| "IMAGE_CHAT_PREPARE_FAILED".to_string());
+            update_state(&id, "failed", Some(&code));
+            return;
+        }
+        for _ in 0..10 {
+            target = get_image_download_cache_target(
+                &account_dir, &keys, &operation.chat_id, operation.local_id,
+            );
+            if target.is_some() { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        if !is_latest_image(operation.local_id,
+                            latest_image_local_id(&account_dir, &keys, &operation.chat_id)) {
+            update_state(&id, "failed", Some("IMAGE_SOURCE_CHANGED"));
+            return;
+        }
+    }
+    let Some(target) = target else {
         update_state(&id, "failed", Some("IMAGE_CACHE_IDENTITY_UNAVAILABLE"));
         return;
     };

@@ -360,3 +360,78 @@ def test_chat_identity_rejects_renamed_or_changed_target_before_ui():
          patch.object(image_download.urllib.request, 'urlopen', return_value=io.BytesIO(json.dumps(chats).encode())):
         with __import__('pytest').raises(image_download.DownloadError, match='CHAT_IDENTITY_CHANGED'):
             image_download.verify_chat_identity('one@chatroom', '群测试')
+
+class NewestImagePositionRegressionTest(unittest.TestCase):
+    def test_new_image_moves_into_view_without_oscillating_past_both_edges(self):
+        geometry = {'X': 0, 'Y': 0, 'WIDTH': 800, 'HEIGHT': 500}
+        state = {'top': 250.0}
+        def snapshot():
+            return {'children': [{'role': 'list-item', 'name': 'Image',
+                'bounds': {'x': 100, 'y': state['top'], 'width': 600, 'height': 285}}]}
+        def scroll(*args):
+            count = int(args[args.index('--repeat') + 1])
+            state['top'] += (80 if args[-1] == '4' else -80) * count
+        with patch.object(image_download, 'tree', side_effect=snapshot), \
+             patch.object(image_download, 'command', side_effect=scroll), \
+             patch.object(image_download.time, 'sleep'):
+            point = image_download.find_newest_image_in_chat(geometry)
+        self.assertGreaterEqual(state['top'], 70)
+        self.assertLessEqual(state['top'] + 285, 395)
+        self.assertGreater(point['y'], state['top'])
+        self.assertLess(point['y'], state['top'] + 285)
+
+class NewImageAfterTextRegressionTest(unittest.TestCase):
+    def test_finds_latest_image_after_many_newer_text_messages(self):
+        geometry = {'X': 0, 'Y': 0, 'WIDTH': 800, 'HEIGHT': 640}
+        state = {'top': -900.0}
+        def snapshot():
+            if state['top'] + 285 <= 0:
+                return {'children': []}
+            return {'children': [{'role': 'list-item', 'name': 'Image',
+                'bounds': {'x': 100, 'y': state['top'], 'width': 600, 'height': 285}}]}
+        def scroll(*args):
+            state['top'] += (80 if args[-1] == '4' else -80) * int(args[args.index('--repeat') + 1])
+        with patch.object(image_download, 'tree', side_effect=snapshot), \
+             patch.object(image_download, 'command', side_effect=scroll), \
+             patch.object(image_download.time, 'sleep'):
+            point = image_download.find_newest_image_in_chat(geometry)
+        self.assertGreaterEqual(state['top'], 70)
+        self.assertLessEqual(state['top'] + 285, 535)
+        self.assertGreater(point['y'], state['top'])
+
+class PrepareNewImageChatTest(unittest.TestCase):
+    def test_prepare_only_loads_verified_chat_without_clicking_image(self):
+        args = SimpleNamespace(chat_id='123@chatroom', chat_name='Target', account_id='account')
+        calls = []
+        with patch.object(image_download, 'agent_json', return_value={'status': 'logged_in', 'loggedInUser': 'account'}), \
+             patch.object(image_download, 'verify_chat_identity', return_value=['Target']), \
+             patch.object(image_download, 'reject_existing_draft'), \
+             patch.object(image_download, 'weixin_geometry'), \
+             patch.object(image_download, 'select_chat', side_effect=lambda *a: calls.append(a)), \
+             patch.object(image_download, 'find_newest_image_in_chat') as click_locator:
+            image_download.prepare_new_image_chat(args)
+        self.assertEqual(calls, [('Target', ['Target'])])
+        click_locator.assert_not_called()
+
+    def test_prepare_rejects_account_change_before_switching_chat(self):
+        args = SimpleNamespace(chat_id='123@chatroom', chat_name='Target', account_id='expected')
+        with patch.object(image_download, 'agent_json', return_value={'status': 'logged_in', 'loggedInUser': 'other'}), \
+             patch.object(image_download, 'select_chat') as select, \
+             self.assertRaisesRegex(image_download.DownloadError, 'IMAGE_ACCOUNT_CHANGED'):
+            image_download.prepare_new_image_chat(args)
+        select.assert_not_called()
+
+    def test_prepare_does_not_hide_existing_draft(self):
+        args = SimpleNamespace(chat_id='123@chatroom', chat_name='Target', account_id='account')
+        with patch.object(image_download, 'agent_json', return_value={'status': 'logged_in', 'loggedInUser': 'account'}), \
+             patch.object(image_download, 'verify_chat_identity', return_value=['Target']), \
+             patch.object(image_download, 'reject_existing_draft', side_effect=image_download.DownloadError('IMAGE_EXISTING_DRAFT')), \
+             patch.object(image_download, 'select_chat') as select, \
+             self.assertRaisesRegex(image_download.DownloadError, 'IMAGE_EXISTING_DRAFT'):
+            image_download.prepare_new_image_chat(args)
+        select.assert_not_called()
+
+    def test_prepare_rejects_unreadable_editor_in_open_chat(self):
+        with patch.object(image_download, 'tree', return_value={'children': [{'role': 'list', 'name': 'Messages'}]}), \
+             self.assertRaisesRegex(image_download.DownloadError, 'IMAGE_EDITOR_UNAVAILABLE'):
+            image_download.reject_existing_draft()

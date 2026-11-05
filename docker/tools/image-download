@@ -7,6 +7,7 @@ import json
 import os
 import pathlib
 import re
+import runpy
 import shutil
 import subprocess
 import tempfile
@@ -242,7 +243,7 @@ def find_newest_image_in_chat(geometry, side="left"):
             direction = "4"
         if attempt < 8:
             command("xdotool", "mousemove", str(scroll_x), str(scroll_y),
-                    "click", "--repeat", "3", "--delay", "70", direction)
+                    "click", "--repeat", "1" if rows else "3", "--delay", "70", direction)
             time.sleep(0.3)
     raise DownloadError("IMAGE_CARD_NOT_FOUND")
 
@@ -539,21 +540,77 @@ def publish_viewer_result(native_path, image_dir, stem, local_id, preview_path, 
         return copy_viewer_image(preview_path), "viewer-clipboard"
 
 
+def agent_json(path):
+    token = pathlib.Path("/data/auth-token").read_text().strip()
+    request = urllib.request.Request("http://127.0.0.1:6174" + path,
+                                     headers={"Authorization": "Bearer " + token})
+    with urllib.request.urlopen(request, timeout=15) as response:
+        return json.load(response)
+
+
+def reject_existing_draft():
+    nodes = list(walk(tree()))
+    if any(node.get("role") == "invalid" and node.get("name", "").startswith("Quote ") for node in nodes):
+        raise DownloadError("IMAGE_EXISTING_DRAFT")
+    editors = [node for node in nodes if node.get("role") == "text"
+               and "EDITABLE" in (node.get("states") or []) and node.get("name") != "Search"]
+    if not editors:
+        if any(node.get("role") == "list" and node.get("name") == "Messages" for node in nodes):
+            raise DownloadError("IMAGE_EDITOR_UNAVAILABLE")
+        return
+    if len(editors) != 1:
+        raise DownloadError("IMAGE_EDITOR_AMBIGUOUS")
+    original = pathlib.Path("/opt/tools/native-reply.finder-original")
+    native = runpy.run_path(str(original if original.exists() else pathlib.Path("/opt/tools/native-reply")))
+    try:
+        text = native["get_text"](editors[0]["name"])
+    except native["ReplyError"] as error:
+        raise DownloadError("IMAGE_EDITOR_UNAVAILABLE") from error
+    if text.strip():
+        raise DownloadError("IMAGE_EXISTING_DRAFT")
+
+
+def prepare_new_image_chat(args):
+    def account_unchanged():
+        auth = agent_json("/api/status/auth")
+        if auth.get("status") != "logged_in" or auth.get("loggedInUser") != args.account_id:
+            raise DownloadError("IMAGE_ACCOUNT_CHANGED")
+    account_unchanged()
+    known_names = verify_chat_identity(args.chat_id, args.chat_name)
+    reject_existing_draft()
+    weixin_geometry()
+    select_chat(args.chat_name, known_names)
+    account_unchanged()
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--chat-id", required=True)
     parser.add_argument("--chat-name", required=True)
     parser.add_argument("--local-id", required=True, type=int)
     parser.add_argument("--thumbnail")
+    parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument("--account-id")
     parser.add_argument("--historical", action="store_true")
-    parser.add_argument("--preview-path", required=True)
-    parser.add_argument("--image-dir", required=True)
-    parser.add_argument("--stem", required=True)
+    parser.add_argument("--preview-path")
+    parser.add_argument("--image-dir")
+    parser.add_argument("--stem")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    if getattr(args, "prepare_only", False):
+        try:
+            if not args.account_id or args.local_id <= 0:
+                raise DownloadError("IMAGE_REFERENCE_INVALID")
+            prepare_new_image_chat(args)
+        except (DownloadError, OSError, ValueError, TypeError, ImportError, subprocess.SubprocessError) as error:
+            fail(str(error) if isinstance(error, DownloadError) else "IMAGE_CHAT_PREPARE_FAILED")
+        print(json.dumps({"ok": True, "prepared": True}))
+        return
+    if not args.image_dir or not args.stem or not args.preview_path:
+        fail("IMAGE_TARGET_PATH_INVALID")
     image_dir = pathlib.Path(args.image_dir)
     valid_stem = re.fullmatch(r"[0-9a-f]{32}", args.stem) is not None
     valid_image_dir = re.fullmatch(

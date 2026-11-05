@@ -40,3 +40,26 @@ the current account has no image decoding key and the extractor has no profile
 for the current WeChat build. Three messages have source-MD5-matched encrypted
 cache files. Do not mark these messages ready, acknowledge them, or bypass
 identity checks to clear the dashboard count.
+
+## 1105 new-image retrieval fix
+
+New image localId 7408 failed before UI retrieval because no exact cache identity
+was available. Loading its verified chat created a hardlink entry. The image
+locator then overshot viewport edges using a fixed three-wheel step; switching
+to one wheel for every search also failed after many newer text messages. The
+fix uses coarse search only while no image row is exposed and fine adjustment
+once a row is available. Existing source/cache identity checks remain in place.
+
+For a latest image with no cache target, the Agent now prepares only the verified
+chat, with account and draft guards, then re-reads the exact cache identity for
+up to two seconds. It does not infer a filename. A changed latest image stops
+this request. Historical image handling and notification rules are unchanged.
+
+Verification: 37 image-helper tests and 87 Linux Rust tests passed. The recovered
+image was opened from its real dashboard card at full 1080x1826 resolution,
+583858 bytes. Production binary SHA-256:
+`508fd5628201c09a1193d1f99d6cd5b053a2fb1572e32222d1154aa728fa7264`.
+The WeChat PID remained unchanged across the Agent binary deployment. A fresh
+post-deployment first-attempt image is still required for final automatic-path
+acceptance. No recovered resource key was stored; current resource DB decoding
+support remains unresolved.

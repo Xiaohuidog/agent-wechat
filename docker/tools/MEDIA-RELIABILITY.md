@@ -38,8 +38,9 @@ The GroupBot dashboard has verified full playback of two recovered Channels
 videos (12.19 and 16.648005 seconds). Four historical images remain unresolved:
 the current account has no image decoding key and the extractor has no profile
 for the current WeChat build. Three messages have source-MD5-matched encrypted
-cache files. Do not mark these messages ready, acknowledge them, or bypass
-identity checks to clear the dashboard count.
+cache files. This was the earlier recovery snapshot. On 2026-11-05 the user
+explicitly retired this historical backlog; see the 1105 2改 disposition below.
+The failed resources were not marked ready and identity checks were not bypassed.
 
 ## 1105 new-image retrieval fix
 
@@ -68,3 +69,18 @@ became ready at 10:20:30, and its fullscreen original decoded at 800x1131,
 This verifies both automatic acquisition and actual dashboard original-image
 viewing for the new sample. No recovered resource key was stored; current resource DB decoding
 support remains unresolved.
+
+## 1105 2改: historical backlog disposition
+
+After new-image acceptance passed, the user explicitly requested no further
+recovery of the old backlog and no inclusion of those errors in alert emails.
+GroupBot acknowledged exactly 26 old media operations, retaining 23 terminal
+and 3 retryable failure states and all original errors. Its existing retry and
+alert queries exclude acknowledged operations. The old media incident was
+retired administratively, without a false recovery email. The normal 10:30 CST
+notification cycle succeeded and generated no new notices for the old incident.
+New tasks, monitoring activation time and future failure alerts remain unchanged.
+
+This 1105 2改 commit records the accepted runtime and operational disposition;
+it adds no Agent runtime change. The deployed binary SHA-256 remains
+`508fd5628201c09a1193d1f99d6cd5b053a2fb1572e32222d1154aa728fa7264`.

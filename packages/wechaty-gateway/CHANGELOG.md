@@ -1,5 +1,7 @@
 # @agent-wechat/wechaty-gateway
 
+## 0.21.0
+
 ## 0.20.0
 
 - Align the gateway image release with the stable Agent Server baseline.

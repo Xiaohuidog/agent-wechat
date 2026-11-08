@@ -1,0 +1,14 @@
+---
+title: Health probes and virtualized lists
+description: Keep client health checks separate from active UI work and virtualized message enumeration.
+---
+
+The health monitor checks process existence first. It then holds the same `/data/groupbot-ui.lock` flock used by external native media tools while it probes the UI. A busy lock defers that probe and resets the UI timeout; process-exit detection still runs. An unavailable lock is reported, and the monitor does not infer an unresponsive client from an unsafe probe.
+
+Health probes invoke `a11y-dump --health-probe`. This retains list roles, names and bounds but never requests their children. Main-window identification can use the navigation controls and list shells. Ordinary interaction snapshots retain message children; if a virtualized list's child count changes during collection, the snapshot discards that list's partial children and marks `childrenUnstable`.
+
+The change addresses an observed client null-object access associated with `mmui::RecyclerListView`: the crash instruction reads member offset `0x60` with a null receiver. Repeated health probes previously traversed dynamic children and could overlap media scrolling. The external UI lock and reduced probe remove that high-frequency traversal path. The exact scheduling of every historic crash cannot be reconstructed, and the client binary itself is unchanged.
+
+Watchdog termination is logged separately from an unexpected process exit. The existing process restart and crash-loop backoff remain active.
+
+Validation includes Python fake-node tests that fail if a health probe enumerates list children, changing-count tests, Rust lock exclusion/release tests, and state recognition with list children removed. Production acceptance must additionally verify the current process remains stable during a legitimate UI lock held beyond the 60-second watchdog threshold and that collection resumes after release.

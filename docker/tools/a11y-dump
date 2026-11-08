@@ -108,7 +108,20 @@ def get_window_info(node):
     return info if info else None
 
 
-def dump_tree_nested(max_depth=30):
+def snapshot_children(node, guarded=False):
+    """Do not reuse a virtualized list's index range after its count changes."""
+    count = node.get_child_count()
+    children = []
+    for index in range(count):
+        if guarded and node.get_child_count() != count:
+            return [], True
+        children.append(node.get_child_at_index(index))
+    if guarded and node.get_child_count() != count:
+        return [], True
+    return children, False
+
+
+def dump_tree_nested(max_depth=30, health_probe=False):
     """Dump desktop as nested JSON tree with children arrays."""
     Atspi.init()
     desktop = Atspi.get_desktop(0)
@@ -148,10 +161,15 @@ def dump_tree_nested(max_depth=30):
                 if window_info:
                     result["window"] = window_info
 
-            # Recursively process children
+            # Health checks need list shells, never virtualized message rows.
+            if health_probe and role == "list":
+                return result
+            nodes, unstable = snapshot_children(node, guarded=role == "list")
+            if unstable:
+                result["childrenUnstable"] = True
             children = []
-            for i in range(node.get_child_count()):
-                child = walk(node.get_child_at_index(i), depth + 1)
+            for child_node in nodes:
+                child = walk(child_node, depth + 1)
                 if child:
                     children.append(child)
 
@@ -165,7 +183,7 @@ def dump_tree_nested(max_depth=30):
     return walk(desktop)
 
 
-def dump_tree_aria(max_depth=30):
+def dump_tree_aria(max_depth=30, health_probe=False):
     """Dump desktop as ARIA-style indented tree."""
     Atspi.init()
     desktop = Atspi.get_desktop(0)
@@ -204,8 +222,11 @@ def dump_tree_aria(max_depth=30):
                 else:
                     lines.append(f"{indent}- {role} {states_str} {bounds_str}".rstrip())
 
-            for i in range(node.get_child_count()):
-                walk(node.get_child_at_index(i), depth + 1)
+            if health_probe and role == "list":
+                return
+            nodes, _unstable = snapshot_children(node, guarded=role == "list")
+            for child_node in nodes:
+                walk(child_node, depth + 1)
         except Exception:
             return
 
@@ -229,12 +250,14 @@ def main():
         default=30,
         help="Maximum tree depth (default: 30)"
     )
+    parser.add_argument("--health-probe", action="store_true",
+                        help="Keep list shells without enumerating virtualized rows")
     args = parser.parse_args()
 
     if args.format == "aria":
-        print(dump_tree_aria(args.max_depth))
+        print(dump_tree_aria(args.max_depth, args.health_probe))
     else:
-        tree = dump_tree_nested(args.max_depth)
+        tree = dump_tree_nested(args.max_depth, args.health_probe)
         print(json.dumps(tree, ensure_ascii=False))
 
 

@@ -1,10 +1,12 @@
+use std::fs::{File, OpenOptions, TryLockError};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::ia::identify_states;
 use crate::ia::selectors::query_selector;
 use crate::sessions::manager::get_session;
-use crate::tools::a11y::get_a11y_desktop;
+use crate::tools::a11y::get_health_a11y_desktop;
 use crate::tools::exec::{exec_command, ExecOptions};
 use crate::tools::screenshot::capture_screenshot;
 use crate::tools::wechat_db::find_wechat_pid;
@@ -36,6 +38,16 @@ pub fn resume_monitoring() {
     MONITORING_PAUSED.store(false, Ordering::Relaxed);
 }
 
+/// Retain the same flock as external native media tools for the whole probe.
+fn try_health_probe_lock(path: &Path) -> std::io::Result<Option<File>> {
+    let file = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(TryLockError::Error(error)) => Err(error),
+    }
+}
+
 /// Spawn WeChat process for the given session using the shared launch script.
 fn spawn_wechat(session: &crate::ia::types::Session) {
     // Use DBUS_SESSION_BUS_ADDRESS from our own environment (inherited from
@@ -64,6 +76,7 @@ pub fn spawn_health_monitor() {
 
         let mut last_identified = Instant::now();
         let mut was_running = false;
+        let mut expected_exit = None;
         let mut restart_count: u32 = 0;
         let mut window_start = Instant::now();
         let mut waiting_restart_since: Option<Instant> = None;
@@ -99,9 +112,11 @@ pub fn spawn_health_monitor() {
                 }
                 None => {
                     if was_running {
-                        tracing::warn!(
-                            "[health] WeChat process disappeared (likely crashed), restarting"
-                        );
+                        if expected_exit.take().is_some() {
+                            tracing::info!("[health] WeChat exited after watchdog termination, restarting");
+                        } else {
+                            tracing::warn!("[health] WeChat exited unexpectedly, restarting");
+                        }
                         was_running = false;
                         waiting_restart_since = Some(Instant::now());
                     }
@@ -138,17 +153,35 @@ pub fn spawn_health_monitor() {
                 }
             };
 
+            let lock_path = std::env::var_os("GROUPBOT_UI_LOCK_FILE")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| "/data/groupbot-ui.lock".into());
+            let _probe_lock = match try_health_probe_lock(&lock_path) {
+                Ok(Some(lock)) => lock,
+                Ok(None) => {
+                    last_identified = Instant::now();
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!("[health] UI probe lock unavailable: {}", error.kind());
+                    last_identified = Instant::now();
+                    continue;
+                }
+            };
+
             // Run a11y + identify to see if we can detect any state
             let exec_options = ExecOptions {
                 session: Some(session.clone()),
                 timeout_ms: 10_000,
             };
 
-            let a11y = match get_a11y_desktop(&exec_options).await {
+            let a11y = match get_health_a11y_desktop(&exec_options).await {
                 Ok(tree) => tree,
                 Err(_) => {
                     // a11y failed — count as unresponsive, don't reset timer
-                    check_and_kill(wechat_pid, &last_identified);
+                    if check_and_kill(wechat_pid, &last_identified) {
+                        expected_exit = Some(wechat_pid);
+                    }
                     continue;
                 }
             };
@@ -181,14 +214,16 @@ pub fn spawn_health_monitor() {
                 last_identified = Instant::now();
             } else {
                 // No state identified — check timeout
-                check_and_kill(wechat_pid, &last_identified);
+                if check_and_kill(wechat_pid, &last_identified) {
+                    expected_exit = Some(wechat_pid);
+                }
             }
         }
     });
 }
 
 /// If time since last identified state exceeds the timeout, kill the WeChat process.
-fn check_and_kill(wechat_pid: i64, last_identified: &Instant) {
+fn check_and_kill(wechat_pid: i64, last_identified: &Instant) -> bool {
     let elapsed = last_identified.elapsed();
     if elapsed.as_secs() >= UNRESPONSIVE_TIMEOUT_SECS {
         tracing::warn!(
@@ -207,6 +242,7 @@ fn check_and_kill(wechat_pid: i64, last_identified: &Instant) {
                     "[health] Killed WeChat pid={}, will restart automatically",
                     wechat_pid
                 );
+                true
             }
             Ok(output) => {
                 tracing::warn!(
@@ -214,9 +250,11 @@ fn check_and_kill(wechat_pid: i64, last_identified: &Instant) {
                     wechat_pid,
                     String::from_utf8_lossy(&output.stderr)
                 );
+                false
             }
             Err(e) => {
                 tracing::error!("[health] Failed to kill WeChat pid={}: {}", wechat_pid, e);
+                false
             }
         }
     } else {
@@ -225,5 +263,33 @@ fn check_and_kill(wechat_pid: i64, last_identified: &Instant) {
             elapsed.as_secs(),
             UNRESPONSIVE_TIMEOUT_SECS
         );
+        false
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn health_probe_respects_external_ui_lock_and_releases_it() {
+        let path = std::env::temp_dir().join(format!("health-lock-{}", uuid::Uuid::new_v4()));
+        let owner = try_health_probe_lock(&path).unwrap().unwrap();
+        assert!(try_health_probe_lock(&path).unwrap().is_none());
+        drop(owner);
+        assert!(try_health_probe_lock(&path).unwrap().is_some());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn health_identification_does_not_require_virtualized_list_children() {
+        fn prune(node: &mut crate::ia::types::A11yNode) {
+            if node.role == "list" { node.children = None; return; }
+            if let Some(children) = &mut node.children { for child in children { prune(child); } }
+        }
+        let mut tree = serde_json::from_str(include_str!("../ia/states/test_fixtures/chat_view.json")).unwrap();
+        prune(&mut tree);
+        assert!(identify_states(&tree, "").main_window.is_some());
     }
 }

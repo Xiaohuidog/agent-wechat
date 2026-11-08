@@ -21,12 +21,20 @@ fn add_parent_refs(node: &mut A11yNode, _parent_index: Option<usize>) {
 pub async fn get_a11y_desktop(
     options: &ExecOptions,
 ) -> Result<A11yNode, String> {
-    let result = exec_command(
-        "python3",
-        &[A11Y_SCRIPT_PATH, "--format", "json"],
-        options,
-    )
-    .await;
+    read_a11y_desktop(options, false).await
+}
+
+/// Health monitoring does not need to enumerate virtualized message children.
+pub async fn get_health_a11y_desktop(options: &ExecOptions) -> Result<A11yNode, String> {
+    read_a11y_desktop(options, true).await
+}
+
+async fn read_a11y_desktop(options: &ExecOptions, health_probe: bool) -> Result<A11yNode, String> {
+    let mut args = vec![A11Y_SCRIPT_PATH, "--format", "json"];
+    if health_probe {
+        args.push("--health-probe");
+    }
+    let result = exec_command("python3", &args, options).await;
 
     if result.exit_code != 0 {
         return Err(result.stderr.clone().or_if_empty(&result.stdout));

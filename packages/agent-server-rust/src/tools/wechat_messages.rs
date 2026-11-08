@@ -384,9 +384,16 @@ fn extract_reply_info(content: &str, msg_type: i32) -> Option<ReplyInfo> {
             .unwrap_or_else(|| "[引用消息]".to_string()),
         _ => unescaped,
     };
+    // Keep the original ID as a decimal string across the JSON boundary.
+    let source_message_id = extract_xml_tag(refermsg, "svrid")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .map(|value| value.to_string());
     Some(ReplyInfo {
         sender,
         content: clean,
+        source_message_id,
+        message_type: ref_type.and_then(|value| value.trim().parse::<i32>().ok()),
     })
 }
 
@@ -707,6 +714,29 @@ mod tests {
     fn media_references_use_labels_instead_of_source_xml() {
         let content = r#"<msg><appmsg><refermsg><type>3</type><content>&lt;msg&gt;&lt;img aeskey="test-value"/&gt;&lt;/msg&gt;</content></refermsg></appmsg></msg>"#;
         assert_eq!(super::extract_reply_info(content, 49).unwrap().content, "[图片]");
+    }
+
+    #[test]
+    fn reply_video_keeps_original_id_without_exposing_source_xml() {
+        let xml = r#"<msg><appmsg><refermsg><type>43</type><svrid>9077482359865875346</svrid><displayname>sender</displayname><content>&lt;msg&gt;private video source&lt;/msg&gt;</content></refermsg></appmsg></msg>"#;
+        let reply = super::extract_reply_info(xml, 49).unwrap();
+        assert_eq!(reply.source_message_id.as_deref(), Some("9077482359865875346"));
+        assert_eq!(reply.message_type, Some(43));
+        assert_eq!(reply.content, "[视频]");
+        let wire = serde_json::to_value(&reply).unwrap();
+        assert!(wire["sourceMessageId"].is_string());
+        assert_eq!(wire["messageType"], 43);
+    }
+
+    #[test]
+    fn reply_reference_rejects_missing_zero_and_out_of_range_ids() {
+        for value in ["", "0", "bad", "18446744073709551616"] {
+            let xml = format!("<msg><appmsg><refermsg><type>62</type><svrid>{value}</svrid><content>video</content></refermsg></appmsg></msg>");
+            let reply = super::extract_reply_info(&xml, 49).unwrap();
+            assert_eq!(reply.source_message_id, None);
+            assert_eq!(reply.message_type, Some(62));
+            assert_eq!(reply.content, "[视频]");
+        }
     }
 
     use super::{clean_content, extract_finder_source, extract_group_sender, finder_info, finder_media_url};

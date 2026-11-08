@@ -1,0 +1,21 @@
+---
+title: Quoted message identity
+description: Preserve original message identifiers for exact quoted video lookup.
+---
+
+Message responses include optional fields in `reply`:
+
+```json
+{
+  "sender": "Example",
+  "content": "[视频]",
+  "sourceMessageId": "9077482359865875346",
+  "messageType": 43
+}
+```
+
+`sourceMessageId` comes from the original `refermsg.svrid`. It stays a decimal string across JSON and TypeScript boundaries so that 64-bit identifiers retain their precision. Missing, zero, invalid and out-of-range identifiers are omitted. `messageType` retains the original referenced message type; 43 and 62 identify video references. Existing clients can continue using `sender` and `content`.
+
+Consumers must match the original identifier within the same account and conversation. Sender names and timestamps are display fields and must not be used to guess a match. Video references retain the safe `[视频]` summary; the response does not expose the referenced raw media XML. A consumer can resolve a collected original video to its own authenticated preview endpoint, with explicit states for unavailable or missing originals.
+
+Regression coverage checks large identifier serialization, video summaries and invalid identifiers. Generate `ReplyInfo.ts` from the Rust binding export test when changing this contract.

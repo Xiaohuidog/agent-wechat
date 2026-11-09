@@ -18,7 +18,7 @@ use crate::ia::{find_state_by_id, identify_states};
 use crate::plans::login::{LoginParams, LoginPlan};
 use crate::plans::logout::{LogoutParams, LogoutPlan};
 use crate::sessions::manager::get_session;
-use crate::tools::a11y::get_a11y_desktop;
+use crate::tools::a11y::get_health_a11y_desktop;
 use crate::tools::exec::ExecOptions;
 use crate::tools::qr::{decode_qr_from_base64, to_data_url};
 use crate::tools::screenshot::capture_screenshot;
@@ -60,7 +60,7 @@ pub async fn auth_status() -> Json<serde_json::Value> {
     };
 
     // Run one observation: a11y → identify → reduce
-    let a11y = match get_a11y_desktop(&exec_options).await {
+    let a11y = match get_health_a11y_desktop(&exec_options).await {
         Ok(tree) => tree,
         Err(_) => {
             return Json(serde_json::json!({
@@ -81,30 +81,14 @@ pub async fn auth_status() -> Json<serde_json::Value> {
         create_context(session.clone(), &db)
     };
 
-    if let Some(ref mw) = identified.main_window {
-        if let Some(state_impl) = find_state_by_id(&mw.state_id) {
-            let screenshot_bytes = base64::engine::general_purpose::STANDARD
-                .decode(&screenshot)
-                .unwrap_or_default();
-            context.state = state_impl.reduce(&ReduceArgs {
-                prev: &context.state,
-                a11y: &a11y,
-                screenshot: &screenshot_bytes,
-            });
-        }
-    }
-
-    // Save updated state
+    let screenshot_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&screenshot).unwrap_or_default();
+    let (next, status) = auth_observation(&context.state, identified.main_window.as_ref(), &a11y, &screenshot_bytes);
+    context.state = next;
     {
         let db = get_db();
         context.save(&db);
     }
-
-    let status = if context.state.main_window.is_logged_in {
-        "logged_in"
-    } else {
-        "logged_out"
-    };
 
     tracing::info!(
         "[auth_status] view={:?}, status={}",
@@ -114,8 +98,25 @@ pub async fn auth_status() -> Json<serde_json::Value> {
 
     Json(serde_json::json!({
         "status": status,
+        "loginState": identified.main_window.as_ref().map(|state| &state.state_id),
         "loggedInUser": session.logged_in_user,
     }))
+}
+
+fn auth_observation(previous: &AppState, observed: Option<&IdentifiedState>, tree: &A11yNode, screenshot: &[u8]) -> (AppState, &'static str) {
+    let Some(observed) = observed else { return (previous.clone(), "unknown"); };
+    let Some(state_impl) = find_state_by_id(&observed.state_id) else { return (previous.clone(), "unknown"); };
+    let mut next = state_impl.reduce(&ReduceArgs {prev:previous,a11y:tree,screenshot});
+    // A shell-only observation cannot determine which chat remains selected.
+    if observed.state_id == "chat" && previous.main_window.is_logged_in {
+        next.main_window.view = previous.main_window.view.clone();
+        next.main_window.selected_chat_id = previous.main_window.selected_chat_id.clone();
+        next.main_window.opened_chat_name = previous.main_window.opened_chat_name.clone();
+        next.main_window.opened_chat_is_group = previous.main_window.opened_chat_is_group;
+        next.main_window.selected_chat_bounds = previous.main_window.selected_chat_bounds.clone();
+    }
+    let status = if next.main_window.is_logged_in { "logged_in" } else { "logged_out" };
+    (next, status)
 }
 
 /// Log out of WeChat via FSM execution loop.
@@ -136,7 +137,7 @@ pub async fn logout() -> Json<serde_json::Value> {
         timeout_ms: 30_000,
     };
 
-    let a11y = match get_a11y_desktop(&exec_options).await {
+    let a11y = match get_health_a11y_desktop(&exec_options).await {
         Ok(tree) => tree,
         Err(e) => {
             return Json(serde_json::json!({
@@ -416,5 +417,31 @@ fn subscription_event_to_login_event(event: SubscriptionEvent) -> LoginSubscript
         _ => LoginSubscriptionEvent::Status {
             message: format!("Unknown event: {}", event.event_type),
         },
+    }
+}
+
+#[cfg(test)]
+mod auth_probe_tests {
+    use super::*;
+
+    #[test]
+    fn unobserved_ui_never_reports_cached_login_as_current() {
+        let mut previous = AppState::default();previous.main_window.is_logged_in = true;
+        let tree = serde_json::from_value(serde_json::json!({"role":"desktop","name":""})).unwrap();
+        assert_eq!(auth_observation(&previous,None,&tree,&[]).1,"unknown");
+    }
+
+    #[test]
+    fn shell_only_chat_probe_preserves_selected_chat_context() {
+        let tree = serde_json::from_value(serde_json::json!({"role":"frame","name":"Weixin","children":[
+            {"role":"push-button","name":"Weixin"},{"role":"push-button","name":"Contacts"},
+            {"role":"list","name":"Chats"}
+        ]})).unwrap();
+        let found = identify_states(&tree,"");
+        let mut previous = AppState::default();previous.main_window.is_logged_in = true;
+        previous.main_window.view = MainWindowView::ChatOpen;
+        previous.main_window.opened_chat_name = Some("selected".into());
+        let (next,status) = auth_observation(&previous,found.main_window.as_ref(),&tree,&[]);
+        assert_eq!(status,"logged_in");assert_eq!(next.main_window.opened_chat_name.as_deref(),Some("selected"));
     }
 }

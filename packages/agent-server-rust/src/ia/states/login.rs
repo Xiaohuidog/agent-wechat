@@ -22,12 +22,6 @@ impl IAState for LoginQrState {
             return Ok(IdentifyResult { identified: false, frame: None });
         }
 
-        let qr = decode_qr_from_base64(args.screenshot);
-        let has_wechat_qr = qr.as_ref().map(|r| r.data.starts_with("http://weixin.qq.com/x/")).unwrap_or(false);
-        if !has_wechat_qr {
-            return Ok(IdentifyResult { identified: false, frame: None });
-        }
-
         Ok(IdentifyResult { identified: true, frame: find_frame_for(args.a11y, r#"label[name*="Scan to log in"]"#) })
     }
 
@@ -39,7 +33,9 @@ impl IAState for LoginQrState {
         let mut state = args.prev.clone();
         state.main_window.view = MainWindowView::LoginQr;
         state.main_window.is_logged_in = false;
-        if let Some(qr_result) = qr {
+        state.main_window.qr_data = None;
+        state.main_window.qr_binary_data = None;
+        if let Some(qr_result) = qr.filter(|qr| qr.data.starts_with("http://weixin.qq.com/x/")) {
             state.main_window.qr_data = Some(qr_result.data);
             state.main_window.qr_binary_data = Some(qr_result.binary_data);
         }
@@ -210,5 +206,41 @@ mod saved_account_tests {
         let result = LoginAccountState.identify(&IdentifyArgs { a11y: &tree, screenshot: "" }).unwrap();
 
         assert!(result.identified);
+    }
+}
+
+#[cfg(test)]
+mod qr_page_tests {
+    use super::*;
+
+    fn page() -> A11yNode {
+        serde_json::from_value(serde_json::json!({"role":"frame","name":"Weixin","children":[
+            {"role":"label","name":"Scan to log in"},
+            {"role":"push-button","name":"Transfer files only"}
+        ]})).unwrap()
+    }
+
+    #[test]
+    fn loading_qr_page_is_recognized_but_never_reuses_old_qr() {
+        let tree = page();
+        assert!(LoginQrState.identify(&IdentifyArgs {a11y:&tree,screenshot:""}).unwrap().identified);
+        let mut previous = AppState::default();
+        previous.main_window.qr_data = Some("obsolete".into());
+        previous.main_window.qr_binary_data = Some(vec![1]);
+        previous.main_window.is_logged_in = true;
+        let next = LoginQrState.reduce(&ReduceArgs {prev:&previous,a11y:&tree,screenshot:&[]});
+        assert!(!next.main_window.is_logged_in);
+        assert!(next.main_window.qr_data.is_none());
+        assert!(next.main_window.qr_binary_data.is_none());
+    }
+
+    #[test]
+    fn decoded_current_wechat_qr_is_published() {
+        let url = "http://weixin.qq.com/x/diagnostic-test";
+        let data = crate::tools::qr::to_data_url(url).unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD.decode(data.split(',').nth(1).unwrap()).unwrap();
+        let tree = page();
+        let next = LoginQrState.reduce(&ReduceArgs {prev:&AppState::default(),a11y:&tree,screenshot:&bytes});
+        assert_eq!(next.main_window.qr_data.as_deref(),Some(url));
     }
 }

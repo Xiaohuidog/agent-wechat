@@ -79,7 +79,7 @@ pub fn spawn_health_monitor() {
         let mut expected_exit = None;
         let mut restart_count: u32 = 0;
         let mut window_start = Instant::now();
-        let mut waiting_restart_since: Option<Instant> = None;
+        let mut waiting_restart_since: Option<Instant> = Some(Instant::now());
         let mut last_saved_account_attempt: Option<Instant> = None;
 
         loop {
